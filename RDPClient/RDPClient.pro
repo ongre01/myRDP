@@ -15,10 +15,12 @@ include(../qmake/freerdp.pri)
 
 SOURCES += \
     main.cpp \
-    mainwindow.cpp
+    mainwindow.cpp \
+    rdpclient.cpp
 
 HEADERS += \
-    mainwindow.h
+    mainwindow.h \
+    rdpclient.h
 
 FORMS += \
     mainwindow.ui
