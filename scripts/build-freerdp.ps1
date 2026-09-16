@@ -88,13 +88,31 @@ if ($LASTEXITCODE -ne 0) {
     throw "FreeRDP build failed with exit code $LASTEXITCODE."
 }
 
+$vcpkgRuntimeDirectory = Join-Path $vcpkgInstalledDirectory 'x64-windows/bin'
+if ($Configuration -eq 'Debug') {
+    $vcpkgRuntimeDirectory = Join-Path $vcpkgInstalledDirectory 'x64-windows/debug/bin'
+}
+
+$runtimeDependencies = Get-ChildItem -LiteralPath $vcpkgRuntimeDirectory -Filter '*.dll' -File
+if (-not $runtimeDependencies) {
+    throw "No vcpkg runtime dependencies were found under $vcpkgRuntimeDirectory."
+}
+
+$freeRdpRuntimeDirectory = Join-Path $installDirectory 'bin'
+New-Item -ItemType Directory -Force -Path $freeRdpRuntimeDirectory | Out-Null
+Copy-Item -LiteralPath $runtimeDependencies.FullName -Destination $freeRdpRuntimeDirectory -Force
+
 $requiredFiles = @(
     'include/freerdp3/freerdp/freerdp.h',
     'include/winpr3/winpr/winpr.h',
     'lib/freerdp3.lib',
     'lib/freerdp-client3.lib',
     'lib/freerdp-server3.lib',
-    'lib/winpr3.lib'
+    'lib/winpr3.lib',
+    'bin/freerdp3.dll',
+    'bin/winpr3.dll',
+    'bin/libcrypto-3-x64.dll',
+    'bin/libssl-3-x64.dll'
 )
 
 foreach ($relativePath in $requiredFiles) {

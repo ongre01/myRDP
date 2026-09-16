@@ -30,6 +30,7 @@ FREERDP_INSTALL_PREFIX = $$clean_path($$FREERDP_INSTALL_PREFIX)
 FREERDP_INCLUDE_DIR = $$FREERDP_INSTALL_PREFIX/include/freerdp$${FREERDP_API_VERSION}
 WINPR_INCLUDE_DIR = $$FREERDP_INSTALL_PREFIX/include/winpr$${FREERDP_API_VERSION}
 FREERDP_LIBRARY_DIR = $$FREERDP_INSTALL_PREFIX/lib
+FREERDP_RUNTIME_DIR = $$FREERDP_INSTALL_PREFIX/bin
 
 !exists($$FREERDP_INCLUDE_DIR/freerdp/freerdp.h) {
     error("FreeRDP headers were not found under $${FREERDP_INCLUDE_DIR}. Run scripts/build-freerdp.ps1 or set FREERDP_INSTALL_PREFIX.")
@@ -68,6 +69,17 @@ for(component, FREERDP_COMPONENTS) {
     }
 
     LIBS += -l$${versionedLibrary}
+}
+
+win32 {
+    FREERDP_RUNTIME_DLLS = $$files($$FREERDP_RUNTIME_DIR/*.dll, false)
+    isEmpty(FREERDP_RUNTIME_DLLS) {
+        error("FreeRDP runtime libraries were not found under $${FREERDP_RUNTIME_DIR}. Run scripts/build-freerdp.ps1 again.")
+    }
+
+    for(runtimeDll, FREERDP_RUNTIME_DLLS) {
+        QMAKE_POST_LINK += $$QMAKE_COPY $$quote($$shell_path($$runtimeDll)) $$quote($(DESTDIR)) $$escape_expand(\\n\\t)
+    }
 }
 
 message("Using FreeRDP from $$FREERDP_INSTALL_PREFIX")
