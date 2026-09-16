@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "clientsettings.h"
 #include "ui_mainwindow.h"
 
 #include <QMessageBox>
@@ -10,6 +11,12 @@ MainWindow::MainWindow(QWidget *parent)
     , ui(new Ui::MainWindow)
 {
     ui->setupUi(this);
+
+    const ConnectionDefaults defaults = ClientSettings::loadConnectionDefaults();
+    ui->serverAddressEdit->setText(defaults.serverAddress);
+    ui->portSpinBox->setValue(defaults.port);
+    ui->usernameEdit->setText(defaults.username);
+    ui->domainEdit->setText(defaults.domain);
 
     connect(ui->connectButton, &QPushButton::clicked, this, &MainWindow::connectToServer);
     connect(ui->disconnectButton,
