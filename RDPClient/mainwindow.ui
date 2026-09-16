@@ -180,7 +180,7 @@
      </widget>
     </item>
     <item>
-     <widget class="QFrame" name="remoteDesktopView">
+     <widget class="RemoteDesktopWidget" name="remoteDesktopView">
       <property name="sizePolicy">
        <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
         <horstretch>0</horstretch>
@@ -205,21 +205,6 @@
       <property name="frameShape">
        <enum>QFrame::StyledPanel</enum>
       </property>
-      <layout class="QVBoxLayout" name="remoteDesktopLayout">
-       <item>
-        <widget class="QLabel" name="remoteDesktopMessageLabel">
-         <property name="styleSheet">
-          <string notr="true">color: #e5e7eb;</string>
-         </property>
-         <property name="text">
-          <string>Connect to an RDP server to begin.</string>
-         </property>
-         <property name="alignment">
-          <set>Qt::AlignCenter</set>
-         </property>
-        </widget>
-       </item>
-      </layout>
      </widget>
     </item>
    </layout>
@@ -236,6 +221,14 @@
   </widget>
   <widget class="QStatusBar" name="statusbar"/>
  </widget>
+ <customwidgets>
+  <customwidget>
+   <class>RemoteDesktopWidget</class>
+   <extends>QFrame</extends>
+   <header>remotedesktopwidget.h</header>
+   <container>1</container>
+  </customwidget>
+ </customwidgets>
  <tabstops>
   <tabstop>serverAddressEdit</tabstop>
   <tabstop>portSpinBox</tabstop>

@@ -19,12 +19,14 @@ SOURCES += \
     clientsettings.cpp \
     main.cpp \
     mainwindow.cpp \
-    rdpclient.cpp
+    rdpclient.cpp \
+    remotedesktopwidget.cpp
 
 HEADERS += \
     clientsettings.h \
     mainwindow.h \
-    rdpclient.h
+    rdpclient.h \
+    remotedesktopwidget.h
 
 FORMS += \
     mainwindow.ui

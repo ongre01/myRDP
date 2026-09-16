@@ -2,8 +2,13 @@
 
 #include <QByteArray>
 
+#include <cstring>
+#include <limits>
+#include <utility>
+
 #include <freerdp/error.h>
 #include <freerdp/freerdp.h>
+#include <freerdp/gdi/gdi.h>
 #include <freerdp/settings.h>
 #include <winpr/winsock.h>
 
@@ -15,16 +20,6 @@ struct ClientContext
     void *owner;
 };
 
-BOOL preConnect(freerdp *instance)
-{
-    return instance && instance->context ? TRUE : FALSE;
-}
-
-BOOL postConnect(freerdp *instance)
-{
-    return instance && instance->context ? TRUE : FALSE;
-}
-
 QString connectionError(const rdpContext *context)
 {
     if (!context) {
@@ -32,6 +27,10 @@ QString connectionError(const rdpContext *context)
     }
 
     const UINT32 errorCode = freerdp_get_last_error(context);
+    if (errorCode == FREERDP_ERROR_SUCCESS) {
+        return QStringLiteral("The RDP connection was closed by the remote server.");
+    }
+
     const char *errorName = freerdp_get_last_error_name(errorCode);
     const char *errorDescription = freerdp_get_last_error_string(errorCode);
     const QString hexadecimalCode = QString::number(errorCode, 16)
@@ -102,6 +101,7 @@ public:
         instance->ContextSize = sizeof(ClientContext);
         instance->PreConnect = preConnect;
         instance->PostConnect = postConnect;
+        instance->PostDisconnect = postDisconnect;
         instance->VerifyCertificateEx = verifyCertificate;
         instance->VerifyChangedCertificateEx = verifyChangedCertificate;
 
@@ -193,9 +193,11 @@ public:
         certificateRejected = false;
         error.clear();
         if (!freerdp_connect(instance)) {
-            error = certificateRejected
-                        ? QStringLiteral("The RDP server certificate was rejected.")
-                        : connectionError(instance->context);
+            if (certificateRejected) {
+                error = QStringLiteral("The RDP server certificate was rejected.");
+            } else if (error.isEmpty()) {
+                error = connectionError(instance->context);
+            }
             certificateVerifier = {};
             return false;
         }
@@ -218,12 +220,188 @@ public:
         connected = false;
     }
 
+    bool processEvents()
+    {
+        if (!connected || !isInitialized()) {
+            return true;
+        }
+
+        if (freerdp_check_event_handles(instance->context)) {
+            return true;
+        }
+
+        const QString eventError = error.isEmpty() ? connectionError(instance->context) : error;
+        (void)freerdp_disconnect(instance);
+        connected = false;
+        error = eventError;
+        return false;
+    }
+
+    void setDesktopUpdateHandler(std::function<void(const DesktopUpdate &)> handler)
+    {
+        desktopUpdateHandler = std::move(handler);
+    }
+
     bool isInitialized() const
     {
         return instance && instance->context;
     }
 
 private:
+    static BOOL preConnect(freerdp *instance)
+    {
+        if (!instance || !instance->context || !instance->context->settings) {
+            return FALSE;
+        }
+
+        rdpSettings *settings = instance->context->settings;
+        return freerdp_settings_set_bool(settings, FreeRDP_SoftwareGdi, TRUE)
+                   && freerdp_settings_set_bool(settings, FreeRDP_DesktopResize, TRUE);
+    }
+
+    static BOOL postConnect(freerdp *instance)
+    {
+        Impl *implementation = owner(instance);
+        if (!implementation || !instance->context || !instance->context->update) {
+            return FALSE;
+        }
+
+        if (!gdi_init(instance, PIXEL_FORMAT_BGRA32)) {
+            implementation->error = QStringLiteral("FreeRDP framebuffer initialization failed.");
+            return FALSE;
+        }
+
+        rdpUpdate *update = instance->context->update;
+        update->BeginPaint = beginPaint;
+        update->EndPaint = endPaint;
+        update->DesktopResize = desktopResize;
+
+        const rdpGdi *gdi = instance->context->gdi;
+        return implementation->publishFramebuffer(
+                   instance->context,
+                   QRect(0, 0, gdi ? gdi->width : 0, gdi ? gdi->height : 0))
+                   ? TRUE
+                   : FALSE;
+    }
+
+    static void postDisconnect(freerdp *instance)
+    {
+        gdi_free(instance);
+    }
+
+    static BOOL beginPaint(rdpContext *context)
+    {
+        if (!context || !context->gdi || !context->gdi->primary
+            || !context->gdi->primary->hdc || !context->gdi->primary->hdc->hwnd
+            || !context->gdi->primary->hdc->hwnd->invalid) {
+            return FALSE;
+        }
+
+        HGDI_WND window = context->gdi->primary->hdc->hwnd;
+        window->invalid->null = TRUE;
+        window->ninvalid = 0;
+        return TRUE;
+    }
+
+    static BOOL endPaint(rdpContext *context)
+    {
+        Impl *implementation = context && context->instance ? owner(context->instance) : nullptr;
+        if (!implementation || !context->gdi || !context->gdi->primary
+            || !context->gdi->primary->hdc || !context->gdi->primary->hdc->hwnd) {
+            return FALSE;
+        }
+
+        HGDI_WND window = context->gdi->primary->hdc->hwnd;
+        if (!window->invalid || window->invalid->null) {
+            return TRUE;
+        }
+
+        const GDI_RGN *invalid = window->invalid;
+        return implementation->publishFramebuffer(
+                   context,
+                   QRect(invalid->x, invalid->y, invalid->w, invalid->h))
+                   ? TRUE
+                   : FALSE;
+    }
+
+    static BOOL desktopResize(rdpContext *context)
+    {
+        Impl *implementation = context && context->instance ? owner(context->instance) : nullptr;
+        if (!implementation || !context->gdi || !context->settings) {
+            return FALSE;
+        }
+
+        const UINT32 width =
+            freerdp_settings_get_uint32(context->settings, FreeRDP_DesktopWidth);
+        const UINT32 height =
+            freerdp_settings_get_uint32(context->settings, FreeRDP_DesktopHeight);
+        if (!gdi_resize(context->gdi, width, height)) {
+            implementation->error = QStringLiteral("The remote desktop framebuffer could not be resized.");
+            return FALSE;
+        }
+
+        return implementation->publishFramebuffer(
+                   context,
+                   QRect(0, 0, context->gdi->width, context->gdi->height))
+                   ? TRUE
+                   : FALSE;
+    }
+
+    bool publishFramebuffer(rdpContext *context, const QRect &requestedRect)
+    {
+        if (!desktopUpdateHandler) {
+            return true;
+        }
+
+        if (!context || !context->gdi || !context->gdi->primary_buffer
+            || context->gdi->width <= 0 || context->gdi->height <= 0) {
+            error = QStringLiteral("The FreeRDP framebuffer is unavailable.");
+            return false;
+        }
+
+        const rdpGdi *gdi = context->gdi;
+        const QSize desktopSize(gdi->width, gdi->height);
+        const QRect dirtyRect = requestedRect.intersected(QRect(QPoint(0, 0), desktopSize));
+        if (dirtyRect.isEmpty()) {
+            return true;
+        }
+
+        constexpr qsizetype bytesPerPixel = 4;
+        const qsizetype bytesPerLine = static_cast<qsizetype>(dirtyRect.width()) * bytesPerPixel;
+        const qsizetype height = dirtyRect.height();
+        if (bytesPerLine <= 0 || bytesPerLine > (std::numeric_limits<int>::max)()
+            || height <= 0
+            || height > (std::numeric_limits<qsizetype>::max)() / bytesPerLine) {
+            error = QStringLiteral("The remote desktop update is too large to display.");
+            return false;
+        }
+        const qsizetype byteCount = bytesPerLine * height;
+
+        DesktopUpdate desktopUpdate;
+        desktopUpdate.desktopSize = desktopSize;
+        desktopUpdate.dirtyRect = dirtyRect;
+        desktopUpdate.bytesPerLine = static_cast<int>(bytesPerLine);
+        desktopUpdate.pixels.resize(byteCount);
+
+        const BYTE *source = gdi->primary_buffer
+                             + static_cast<qsizetype>(dirtyRect.y()) * gdi->stride
+                             + static_cast<qsizetype>(dirtyRect.x()) * bytesPerPixel;
+        char *destination = desktopUpdate.pixels.data();
+        for (int row = 0; row < dirtyRect.height(); ++row) {
+            std::memcpy(destination + static_cast<qsizetype>(row) * bytesPerLine,
+                        source + static_cast<qsizetype>(row) * gdi->stride,
+                        static_cast<size_t>(bytesPerLine));
+        }
+
+        try {
+            desktopUpdateHandler(desktopUpdate);
+        } catch (...) {
+            error = QStringLiteral("The remote desktop update handler failed.");
+            return false;
+        }
+        return true;
+    }
+
     static ClientContext *clientContext(freerdp *instance)
     {
         return instance && instance->context
@@ -311,6 +489,7 @@ public:
     bool certificateRejected = false;
     QString error;
     std::function<CertificateDecision(const CertificateInfo &)> certificateVerifier;
+    std::function<void(const DesktopUpdate &)> desktopUpdateHandler;
 };
 
 RdpClient::RdpClient()
@@ -328,6 +507,17 @@ bool RdpClient::connectToServer(const ConnectionInfo &info)
 void RdpClient::disconnect()
 {
     d->disconnect();
+}
+
+bool RdpClient::processEvents()
+{
+    return d->processEvents();
+}
+
+void RdpClient::setDesktopUpdateHandler(
+    std::function<void(const DesktopUpdate &)> handler)
+{
+    d->setDesktopUpdateHandler(std::move(handler));
 }
 
 bool RdpClient::isInitialized() const

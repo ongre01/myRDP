@@ -4,6 +4,7 @@
 #include "rdpclient.h"
 
 #include <QMainWindow>
+#include <QTimer>
 
 QT_BEGIN_NAMESPACE
 namespace Ui {
@@ -22,6 +23,7 @@ public:
 private slots:
     void connectToServer();
     void disconnectFromServer();
+    void processRdpEvents();
 
 private:
     enum class ConnectionUiState
@@ -35,8 +37,10 @@ private:
     void setConnectionUiState(ConnectionUiState state, const QString &message = QString());
     void showConnectionError(const QString &message);
     CertificateDecision verifyServerCertificate(const CertificateInfo &certificate);
+    void displayDesktopUpdate(const DesktopUpdate &desktopUpdate);
 
     Ui::MainWindow *ui;
     RdpClient client;
+    QTimer rdpEventTimer;
 };
 #endif // MAINWINDOW_H

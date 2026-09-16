@@ -1,6 +1,9 @@
 #ifndef RDPCLIENT_H
 #define RDPCLIENT_H
 
+#include <QByteArray>
+#include <QRect>
+#include <QSize>
 #include <QString>
 
 #include <functional>
@@ -37,6 +40,14 @@ struct ConnectionInfo
     std::function<CertificateDecision(const CertificateInfo &)> certificateVerifier;
 };
 
+struct DesktopUpdate
+{
+    QSize desktopSize;
+    QRect dirtyRect;
+    QByteArray pixels;
+    int bytesPerLine = 0;
+};
+
 class RdpClient
 {
 public:
@@ -50,6 +61,8 @@ public:
 
     bool connectToServer(const ConnectionInfo &info);
     void disconnect();
+    bool processEvents();
+    void setDesktopUpdateHandler(std::function<void(const DesktopUpdate &)> handler);
 
     bool isInitialized() const;
     bool isConnected() const;

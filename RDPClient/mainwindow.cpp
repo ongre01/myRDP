@@ -3,6 +3,7 @@
 #include "ui_mainwindow.h"
 
 #include <QMessageBox>
+#include <QImage>
 #include <QStatusBar>
 #include <QStringList>
 
@@ -23,6 +24,11 @@ MainWindow::MainWindow(QWidget *parent)
             &QPushButton::clicked,
             this,
             &MainWindow::disconnectFromServer);
+    connect(&rdpEventTimer, &QTimer::timeout, this, &MainWindow::processRdpEvents);
+    rdpEventTimer.setInterval(16);
+    rdpEventTimer.setTimerType(Qt::PreciseTimer);
+    client.setDesktopUpdateHandler(
+        [this](const DesktopUpdate &desktopUpdate) { displayDesktopUpdate(desktopUpdate); });
 
     if (client.isInitialized()) {
         setConnectionUiState(ConnectionUiState::Disconnected);
@@ -33,6 +39,9 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    rdpEventTimer.stop();
+    client.setDesktopUpdateHandler({});
+    client.disconnect();
     delete ui;
 }
 
@@ -63,10 +72,12 @@ void MainWindow::connectToServer()
                                  .arg(connectionInfo.port);
     setConnectionUiState(ConnectionUiState::Connected, tr("Connected to %1").arg(endpoint));
     statusBar()->showMessage(tr("Connected to %1").arg(endpoint));
+    rdpEventTimer.start();
 }
 
 void MainWindow::disconnectFromServer()
 {
+    rdpEventTimer.stop();
     client.disconnect();
 
     if (!client.lastError().isEmpty()) {
@@ -76,6 +87,16 @@ void MainWindow::disconnectFromServer()
 
     setConnectionUiState(ConnectionUiState::Disconnected);
     statusBar()->showMessage(tr("Disconnected"), 3000);
+}
+
+void MainWindow::processRdpEvents()
+{
+    if (client.processEvents()) {
+        return;
+    }
+
+    rdpEventTimer.stop();
+    showConnectionError(client.lastError());
 }
 
 void MainWindow::setConnectionUiState(ConnectionUiState state, const QString &message)
@@ -96,22 +117,25 @@ void MainWindow::setConnectionUiState(ConnectionUiState state, const QString &me
     case ConnectionUiState::Disconnected:
         ui->connectionStatusValueLabel->setText(tr("Disconnected"));
         ui->connectionStatusValueLabel->setStyleSheet(QStringLiteral("color: #6b7280;"));
-        ui->remoteDesktopMessageLabel->setText(tr("Connect to an RDP server to begin."));
+        ui->remoteDesktopView->clearDesktop();
+        ui->remoteDesktopView->setPlaceholderMessage(tr("Connect to an RDP server to begin."));
         break;
     case ConnectionUiState::Connecting:
         ui->connectionStatusValueLabel->setText(message.isEmpty() ? tr("Connecting...") : message);
         ui->connectionStatusValueLabel->setStyleSheet(QStringLiteral("color: #9a6700;"));
-        ui->remoteDesktopMessageLabel->setText(tr("Establishing the RDP connection..."));
+        ui->remoteDesktopView->clearDesktop();
+        ui->remoteDesktopView->setPlaceholderMessage(tr("Establishing the RDP connection..."));
         break;
     case ConnectionUiState::Connected:
         ui->connectionStatusValueLabel->setText(message.isEmpty() ? tr("Connected") : message);
         ui->connectionStatusValueLabel->setStyleSheet(QStringLiteral("color: #1a7f37;"));
-        ui->remoteDesktopMessageLabel->setText(tr("Waiting for the remote desktop..."));
+        ui->remoteDesktopView->setPlaceholderMessage(tr("Waiting for the remote desktop..."));
         break;
     case ConnectionUiState::Error:
         ui->connectionStatusValueLabel->setText(tr("Connection failed"));
         ui->connectionStatusValueLabel->setStyleSheet(QStringLiteral("color: #cf222e;"));
-        ui->remoteDesktopMessageLabel->setText(tr("The remote desktop is unavailable."));
+        ui->remoteDesktopView->clearDesktop();
+        ui->remoteDesktopView->setPlaceholderMessage(tr("The remote desktop is unavailable."));
         break;
     }
 }
@@ -124,6 +148,23 @@ void MainWindow::showConnectionError(const QString &message)
     setConnectionUiState(ConnectionUiState::Error);
     statusBar()->showMessage(errorMessage);
     QMessageBox::critical(this, tr("RDP Connection Error"), errorMessage);
+}
+
+void MainWindow::displayDesktopUpdate(const DesktopUpdate &desktopUpdate)
+{
+    if (desktopUpdate.pixels.isEmpty() || desktopUpdate.bytesPerLine <= 0
+        || desktopUpdate.dirtyRect.isEmpty()) {
+        return;
+    }
+
+    const QImage regionImage(reinterpret_cast<const uchar *>(desktopUpdate.pixels.constData()),
+                             desktopUpdate.dirtyRect.width(),
+                             desktopUpdate.dirtyRect.height(),
+                             desktopUpdate.bytesPerLine,
+                             QImage::Format_RGB32);
+    ui->remoteDesktopView->updateDesktopRegion(desktopUpdate.desktopSize,
+                                               desktopUpdate.dirtyRect,
+                                               regionImage);
 }
 
 CertificateDecision MainWindow::verifyServerCertificate(const CertificateInfo &certificate)
