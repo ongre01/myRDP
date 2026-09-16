@@ -5,6 +5,7 @@
 #include <freerdp/error.h>
 #include <freerdp/freerdp.h>
 #include <freerdp/settings.h>
+#include <winpr/winsock.h>
 
 namespace {
 
@@ -81,6 +82,17 @@ class RdpClient::Impl
 public:
     Impl()
     {
+#if defined(_WIN32)
+        WSADATA socketData = {};
+        const int socketResult = WSAStartup(MAKEWORD(2, 2), &socketData);
+        if (socketResult != 0) {
+            error = QStringLiteral("Windows socket initialization failed (WSAStartup error %1).")
+                        .arg(socketResult);
+            return;
+        }
+        winsockInitialized = true;
+#endif
+
         instance = freerdp_new();
         if (!instance) {
             error = QStringLiteral("FreeRDP instance initialization failed.");
@@ -111,6 +123,12 @@ public:
             freerdp_context_free(instance);
             freerdp_free(instance);
         }
+
+#if defined(_WIN32)
+        if (winsockInitialized) {
+            WSACleanup();
+        }
+#endif
     }
 
     bool connectToServer(const ConnectionInfo &info)
@@ -288,6 +306,7 @@ private:
 public:
 
     freerdp *instance = nullptr;
+    bool winsockInitialized = false;
     bool connected = false;
     bool certificateRejected = false;
     QString error;

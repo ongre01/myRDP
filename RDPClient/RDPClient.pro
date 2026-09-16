@@ -13,6 +13,8 @@ FREERDP_COMPONENTS = \
 
 include(../qmake/freerdp.pri)
 
+win32: LIBS += -lws2_32
+
 SOURCES += \
     main.cpp \
     mainwindow.cpp \
