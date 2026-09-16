@@ -51,6 +51,9 @@
        </item>
        <item row="0" column="1">
         <widget class="QLineEdit" name="serverAddressEdit">
+         <property name="text">
+          <string>ongre01.iptime.org</string>
+         </property>
          <property name="placeholderText">
           <string>Hostname or IP address</string>
          </property>
@@ -78,7 +81,7 @@
           <number>65535</number>
          </property>
          <property name="value">
-          <number>3389</number>
+          <number>7000</number>
          </property>
         </widget>
        </item>
@@ -114,6 +117,9 @@
        </item>
        <item row="1" column="1">
         <widget class="QLineEdit" name="usernameEdit">
+         <property name="text">
+          <string>JeHwan</string>
+         </property>
          <property name="placeholderText">
           <string>Remote Desktop account</string>
          </property>
