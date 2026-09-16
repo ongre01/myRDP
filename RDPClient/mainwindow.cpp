@@ -3,6 +3,7 @@
 
 #include <QMessageBox>
 #include <QStatusBar>
+#include <QStringList>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -30,9 +31,14 @@ MainWindow::~MainWindow()
 
 void MainWindow::connectToServer()
 {
-    const ConnectionInfo connectionInfo {
-        ui->serverAddressEdit->text(),
-        ui->portSpinBox->value()
+    ConnectionInfo connectionInfo;
+    connectionInfo.serverAddress = ui->serverAddressEdit->text();
+    connectionInfo.port = ui->portSpinBox->value();
+    connectionInfo.username = ui->usernameEdit->text();
+    connectionInfo.password = ui->passwordEdit->text();
+    connectionInfo.domain = ui->domainEdit->text();
+    connectionInfo.certificateVerifier = [this](const CertificateInfo &certificate) {
+        return verifyServerCertificate(certificate);
     };
 
     setConnectionUiState(ConnectionUiState::Connecting,
@@ -73,6 +79,9 @@ void MainWindow::setConnectionUiState(ConnectionUiState state, const QString &me
 
     ui->serverAddressEdit->setEnabled(initialized && !connected && !busy);
     ui->portSpinBox->setEnabled(initialized && !connected && !busy);
+    ui->usernameEdit->setEnabled(initialized && !connected && !busy);
+    ui->passwordEdit->setEnabled(initialized && !connected && !busy);
+    ui->domainEdit->setEnabled(initialized && !connected && !busy);
     ui->connectButton->setEnabled(initialized && !connected && !busy);
     ui->disconnectButton->setEnabled(initialized && connected);
 
@@ -108,4 +117,42 @@ void MainWindow::showConnectionError(const QString &message)
     setConnectionUiState(ConnectionUiState::Error);
     statusBar()->showMessage(errorMessage);
     QMessageBox::critical(this, tr("RDP Connection Error"), errorMessage);
+}
+
+CertificateDecision MainWindow::verifyServerCertificate(const CertificateInfo &certificate)
+{
+    QStringList details;
+    details << tr("Server: %1:%2").arg(certificate.host).arg(certificate.port)
+            << tr("Common name: %1").arg(certificate.commonName)
+            << tr("Subject: %1").arg(certificate.subject)
+            << tr("Issuer: %1").arg(certificate.issuer)
+            << tr("Fingerprint: %1").arg(certificate.fingerprint);
+
+    if (certificate.hostNameMismatch) {
+        details << tr("Warning: The certificate name does not match the server address.");
+    }
+
+    if (certificate.changed) {
+        details << QString()
+                << tr("The certificate has changed since the previous connection.")
+                << tr("Previous subject: %1").arg(certificate.oldSubject)
+                << tr("Previous issuer: %1").arg(certificate.oldIssuer)
+                << tr("Previous fingerprint: %1").arg(certificate.oldFingerprint);
+    }
+
+    QMessageBox dialog(certificate.changed ? QMessageBox::Critical : QMessageBox::Warning,
+                       certificate.changed ? tr("RDP Server Certificate Changed")
+                                           : tr("Untrusted RDP Server Certificate"),
+                       details.join(QLatin1Char('\n')),
+                       QMessageBox::NoButton,
+                       this);
+    dialog.setTextFormat(Qt::PlainText);
+    dialog.setInformativeText(tr("Verify the certificate details before continuing."));
+    QPushButton *trustButton = dialog.addButton(tr("Trust for this connection"),
+                                                QMessageBox::AcceptRole);
+    dialog.addButton(QMessageBox::Cancel);
+    dialog.exec();
+
+    return dialog.clickedButton() == trustButton ? CertificateDecision::TrustOnce
+                                                  : CertificateDecision::Reject;
 }

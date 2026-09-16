@@ -34,6 +34,7 @@ private:
 
     void setConnectionUiState(ConnectionUiState state, const QString &message = QString());
     void showConnectionError(const QString &message);
+    CertificateDecision verifyServerCertificate(const CertificateInfo &certificate);
 
     Ui::MainWindow *ui;
     RdpClient client;

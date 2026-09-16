@@ -3,12 +3,38 @@
 
 #include <QString>
 
+#include <functional>
 #include <memory>
+
+struct CertificateInfo
+{
+    QString host;
+    int port = 0;
+    QString commonName;
+    QString subject;
+    QString issuer;
+    QString fingerprint;
+    QString oldSubject;
+    QString oldIssuer;
+    QString oldFingerprint;
+    bool hostNameMismatch = false;
+    bool changed = false;
+};
+
+enum class CertificateDecision
+{
+    Reject,
+    TrustOnce
+};
 
 struct ConnectionInfo
 {
     QString serverAddress;
     int port = 3389;
+    QString username;
+    QString password;
+    QString domain;
+    std::function<CertificateDecision(const CertificateInfo &)> certificateVerifier;
 };
 
 class RdpClient
