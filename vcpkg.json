@@ -1,0 +1,9 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "qtrdp-native-dependencies",
+  "version-string": "0.1.0",
+  "builtin-baseline": "525107aaddf948113a40cf443f268675cda3b509",
+  "dependencies": [
+    "openssl"
+  ]
+}

@@ -1,7 +1,16 @@
 # Shared FreeRDP configuration for the QtRdp applications.
 
-lessThan(QT_MAJOR_VERSION, 6) {
-    error("QtRdp requires Qt 6 or newer.")
+QTRDP_QT_VERSION = $$[QT_VERSION]
+isEmpty(QTRDP_QT_VERSION) {
+    QTRDP_QT_VERSION = $$QT_VERSION
+}
+
+isEmpty(QTRDP_QT_VERSION) {
+    error("QtRdp could not determine the Qt version from qmake. Check the Kit selected in Qt Creator.")
+}
+
+lessThan(QTRDP_QT_VERSION, 6.0.0) {
+    error("QtRdp requires Qt 6 or newer. The selected Kit reports Qt $${QTRDP_QT_VERSION} from $$[QT_INSTALL_PREFIX]. Select a Qt 6 MSVC2022 64-bit Kit in Qt Creator.")
 }
 
 isEmpty(FREERDP_API_VERSION) {
@@ -23,15 +32,15 @@ WINPR_INCLUDE_DIR = $$FREERDP_INSTALL_PREFIX/include/winpr$${FREERDP_API_VERSION
 FREERDP_LIBRARY_DIR = $$FREERDP_INSTALL_PREFIX/lib
 
 !exists($$FREERDP_INCLUDE_DIR/freerdp/freerdp.h) {
-    error("FreeRDP headers were not found under $$FREERDP_INCLUDE_DIR. Build and install FreeRDP first or set FREERDP_INSTALL_PREFIX.")
+    error("FreeRDP headers were not found under $${FREERDP_INCLUDE_DIR}. Run scripts/build-freerdp.ps1 or set FREERDP_INSTALL_PREFIX.")
 }
 
 !exists($$WINPR_INCLUDE_DIR/winpr/winpr.h) {
-    error("WinPR headers were not found under $$WINPR_INCLUDE_DIR. Build and install FreeRDP first or set FREERDP_INSTALL_PREFIX.")
+    error("WinPR headers were not found under $${WINPR_INCLUDE_DIR}. Run scripts/build-freerdp.ps1 or set FREERDP_INSTALL_PREFIX.")
 }
 
 !exists($$FREERDP_LIBRARY_DIR) {
-    error("FreeRDP library directory was not found at $$FREERDP_LIBRARY_DIR.")
+    error("FreeRDP library directory was not found at $${FREERDP_LIBRARY_DIR}.")
 }
 
 isEmpty(FREERDP_COMPONENTS) {
@@ -54,7 +63,7 @@ for(component, FREERDP_COMPONENTS) {
     win32 {
         libraryFile = $$FREERDP_LIBRARY_DIR/$${versionedLibrary}.lib
         !exists($$libraryFile) {
-            error("Required FreeRDP library was not found at $$libraryFile.")
+            error("Required FreeRDP library was not found at $${libraryFile}.")
         }
     }
 
