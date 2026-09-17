@@ -267,6 +267,13 @@ public:
                 peer,
                 [this](quint64 closedId, const QString &peerAddress) {
                     emit owner->clientDisconnected(closedId, peerAddress);
+                },
+                [this](quint64 failedId, const QString &message) {
+                    const QString sessionError = RdpServer::tr("Session %1: %2")
+                                                     .arg(failedId)
+                                                     .arg(message);
+                    setError(sessionError);
+                    emit owner->errorOccurred(sessionError);
                 });
             newSession = session.get();
             sessions.emplace(id, std::move(session));

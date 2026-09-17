@@ -1,5 +1,6 @@
+#include "desktopcapture.h"
+#include "desktopframebuffer_p.h"
 #include "rdpserver.h"
-#include "rdptestframe_p.h"
 
 #include <QSignalSpy>
 #include <QScopeGuard>
@@ -13,7 +14,6 @@
 #include <freerdp/settings.h>
 #include <winpr/synch.h>
 
-#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -26,6 +26,16 @@ struct TestClientContext
     std::uint64_t firstFrameHash = 0;
     std::uint64_t lastFrameHash = 0;
     std::uint32_t frameCount = 0;
+};
+
+struct TestConnectionResult
+{
+    bool connected = false;
+    bool tlsNegotiated = false;
+    std::uint64_t firstFrameHash = 0;
+    std::uint64_t lastFrameHash = 0;
+    std::uint32_t frameCount = 0;
+    QString error;
 };
 
 std::uint64_t framebufferHash(const rdpGdi *gdi)
@@ -93,6 +103,117 @@ void testClientPostDisconnect(freerdp *instance)
         gdi_free(instance);
     }
 }
+
+TestConnectionResult connectAndReceiveFrames(quint16 port)
+{
+    TestConnectionResult result;
+    freerdp *client = freerdp_new();
+    if (!client) {
+        result.error = QStringLiteral("Failed to create the FreeRDP test client.");
+        return result;
+    }
+
+    bool contextCreated = false;
+    bool connected = false;
+    const auto cleanup = qScopeGuard([&]() {
+        if (connected) {
+            (void)freerdp_disconnect(client);
+        }
+        if (contextCreated) {
+            freerdp_context_free(client);
+        }
+        freerdp_free(client);
+    });
+
+    client->ContextSize = sizeof(TestClientContext);
+    client->PostConnect = testClientPostConnect;
+    client->PostDisconnect = testClientPostDisconnect;
+    if (!freerdp_context_new(client)) {
+        result.error = QStringLiteral("Failed to create the FreeRDP test client context.");
+        return result;
+    }
+    contextCreated = true;
+
+    rdpSettings *settings = client->context->settings;
+    if (!settings
+        || !freerdp_settings_set_string(settings, FreeRDP_ServerHostname, "127.0.0.1")
+        || !freerdp_settings_set_uint32(settings, FreeRDP_ServerPort, port)
+        || !freerdp_settings_set_string(settings, FreeRDP_Username, "test")
+        || !freerdp_settings_set_string(settings, FreeRDP_Password, "test")
+        || !freerdp_settings_set_bool(settings, FreeRDP_Authentication, FALSE)
+        || !freerdp_settings_set_bool(settings, FreeRDP_NegotiateSecurityLayer, TRUE)
+        || !freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, FALSE)
+        || !freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE)
+        || !freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, FALSE)
+        || !freerdp_settings_set_bool(settings, FreeRDP_ExtSecurity, FALSE)
+        || !freerdp_settings_set_bool(settings, FreeRDP_UseRdpSecurityLayer, FALSE)
+        || !freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, TRUE)
+        || !freerdp_settings_set_bool(settings, FreeRDP_SoftwareGdi, TRUE)
+        || !freerdp_settings_set_bool(settings, FreeRDP_NSCodec, TRUE)
+        || !freerdp_settings_set_bool(settings, FreeRDP_NetworkAutoDetect, TRUE)
+        || !freerdp_settings_set_bool(settings, FreeRDP_SupportMultitransport, TRUE)
+        || !freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, 640)
+        || !freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, 480)
+        || !freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32)) {
+        result.error = QStringLiteral("Failed to configure the FreeRDP TLS test client.");
+        return result;
+    }
+
+    if (!freerdp_connect(client)) {
+        const UINT32 error = freerdp_get_last_error(client->context);
+        result.error = QString::fromUtf8(freerdp_get_last_error_name(error));
+        if (result.error.isEmpty()) {
+            result.error = QStringLiteral("FreeRDP TLS connection failed with error %1.").arg(error);
+        }
+        return result;
+    }
+    connected = true;
+    result.connected = true;
+    result.tlsNegotiated = freerdp_settings_get_bool(settings, FreeRDP_TlsSecurity)
+                           && !freerdp_settings_get_bool(settings, FreeRDP_RdpSecurity)
+                           && !freerdp_settings_get_bool(settings, FreeRDP_NlaSecurity);
+
+    auto *testContext = reinterpret_cast<TestClientContext *>(client->context);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (testContext->frameCount < 1 && std::chrono::steady_clock::now() < deadline) {
+        std::array<HANDLE, 64> handles = {};
+        const DWORD handleCount = freerdp_get_event_handles(client->context,
+                                                            handles.data(),
+                                                            static_cast<DWORD>(handles.size()));
+        if (handleCount == 0) {
+            result.error = QStringLiteral("FreeRDP returned no client event handles.");
+            break;
+        }
+
+        const DWORD waitResult = WaitForMultipleObjects(handleCount,
+                                                        handles.data(),
+                                                        FALSE,
+                                                        100);
+        if (waitResult == WAIT_FAILED
+            || (waitResult != WAIT_TIMEOUT && waitResult >= WAIT_OBJECT_0 + handleCount)) {
+            result.error = QStringLiteral("Waiting for a FreeRDP client event failed.");
+            break;
+        }
+        if (waitResult != WAIT_TIMEOUT && !freerdp_check_event_handles(client->context)) {
+            const UINT32 error = freerdp_get_last_error(client->context);
+            result.error = QString::fromUtf8(freerdp_get_last_error_name(error));
+            if (result.error.isEmpty()) {
+                result.error = QStringLiteral("FreeRDP event processing failed with error %1.")
+                                   .arg(error);
+            }
+            break;
+        }
+    }
+
+    result.frameCount = testContext->frameCount;
+    result.firstFrameHash = testContext->firstFrameHash;
+    result.lastFrameHash = testContext->lastFrameHash;
+    if (result.frameCount < 1 && result.error.isEmpty()) {
+        result.error = QStringLiteral("Timed out after receiving %1 desktop frames.")
+                           .arg(result.frameCount);
+    }
+    return result;
+}
 } // namespace
 
 class RdpServerTest : public QObject
@@ -102,8 +223,9 @@ class RdpServerTest : public QObject
 private slots:
     void rejectsInvalidPort();
     void acceptsAndClosesSession();
-    void generatesChangingTestFrames();
-    void connectsAndReceivesChangingFrames();
+    void tracksDesktopFrameChanges();
+    void capturesWindowsDesktop();
+    void connectsWithTlsAndReconnects();
 };
 
 void RdpServerTest::rejectsInvalidPort()
@@ -163,32 +285,94 @@ void RdpServerTest::acceptsAndClosesSession()
     QVERIFY(!server.isListening());
 }
 
-void RdpServerTest::generatesChangingTestFrames()
+void RdpServerTest::tracksDesktopFrameChanges()
 {
-    const RdpTestFrame full = RdpTestFrameGenerator::fullFrame(640, 480, 41);
-    QVERIFY(full.isValid());
-    QCOMPARE(full.x, std::uint16_t(0));
-    QCOMPARE(full.y, std::uint16_t(0));
-    QCOMPARE(full.width, std::uint16_t(640));
-    QCOMPARE(full.height, std::uint16_t(480));
-    QCOMPARE(full.pixels.size(), std::size_t(640 * 480 * 4));
+    DesktopFrameBuffer frameBuffer;
+    const DesktopSize initialSize = {32, 32};
+    const std::uint32_t initialStride = initialSize.width * desktopCaptureBytesPerPixel;
+    std::vector<std::uint8_t> pixels(initialStride * initialSize.height, 0x20);
 
-    const RdpTestFrame counter41 = RdpTestFrameGenerator::counterFrame(640, 480, 41);
-    const RdpTestFrame counter42 = RdpTestFrameGenerator::counterFrame(640, 480, 42);
-    QVERIFY(counter41.isValid());
-    QVERIFY(counter42.isValid());
-    QCOMPARE(counter41.x, counter42.x);
-    QCOMPARE(counter41.y, counter42.y);
-    QCOMPARE(counter41.width, counter42.width);
-    QCOMPARE(counter41.height, counter42.height);
-    QVERIFY(counter41.pixels != counter42.pixels);
+    const DesktopCaptureResult initial = frameBuffer.update(initialSize,
+                                                             initialStride,
+                                                             pixels,
+                                                             false);
+    QCOMPARE(initial.status, DesktopCaptureStatus::FrameReady);
+    QVERIFY(initial.frame.isValid());
+    QCOMPARE(initial.frame.x, std::uint32_t(0));
+    QCOMPARE(initial.frame.y, std::uint32_t(0));
+    QCOMPARE(initial.frame.width, initialSize.width);
+    QCOMPARE(initial.frame.height, initialSize.height);
+    QVERIFY(!initial.frame.desktopSizeChanged);
 
-    const auto firstPixel = full.pixels.cbegin();
-    const auto lastPixel = full.pixels.cend();
-    QVERIFY(std::adjacent_find(firstPixel, lastPixel, std::not_equal_to<>()) != lastPixel);
+    const DesktopCaptureResult unchanged = frameBuffer.update(initialSize,
+                                                               initialStride,
+                                                               pixels,
+                                                               false);
+    QCOMPARE(unchanged.status, DesktopCaptureStatus::NoChanges);
+
+    const std::size_t changedPixel = static_cast<std::size_t>(5) * initialStride
+                                     + static_cast<std::size_t>(20)
+                                           * desktopCaptureBytesPerPixel;
+    pixels[changedPixel] = 0xF0;
+    const DesktopCaptureResult changed = frameBuffer.update(initialSize,
+                                                             initialStride,
+                                                             pixels,
+                                                             false);
+    QCOMPARE(changed.status, DesktopCaptureStatus::FrameReady);
+    QVERIFY(changed.frame.isValid());
+    QCOMPARE(changed.frame.x, std::uint32_t(16));
+    QCOMPARE(changed.frame.y, std::uint32_t(0));
+    QCOMPARE(changed.frame.width, std::uint32_t(16));
+    QCOMPARE(changed.frame.height, std::uint32_t(16));
+
+    const DesktopSize resizedSize = {48, 16};
+    const std::uint32_t resizedStride = resizedSize.width * desktopCaptureBytesPerPixel;
+    pixels.assign(resizedStride * resizedSize.height, 0x40);
+    const DesktopCaptureResult resized = frameBuffer.update(resizedSize,
+                                                             resizedStride,
+                                                             pixels,
+                                                             false);
+    QCOMPARE(resized.status, DesktopCaptureStatus::FrameReady);
+    QVERIFY(resized.frame.isValid());
+    QVERIFY(resized.frame.desktopSizeChanged);
+    QCOMPARE(resized.frame.width, resizedSize.width);
+    QCOMPARE(resized.frame.height, resizedSize.height);
+
+    const DesktopCaptureResult invalid = frameBuffer.update(resizedSize,
+                                                             resizedStride,
+                                                             {},
+                                                             false);
+    QCOMPARE(invalid.status, DesktopCaptureStatus::Error);
+    QVERIFY(!invalid.errorMessage.isEmpty());
 }
 
-void RdpServerTest::connectsAndReceivesChangingFrames()
+void RdpServerTest::capturesWindowsDesktop()
+{
+#if defined(Q_OS_WIN)
+    std::unique_ptr<DesktopCapture> capture = createDesktopCapture();
+    QVERIFY(capture);
+
+    QString errorMessage;
+    const DesktopSize size = capture->desktopSize(&errorMessage);
+    QVERIFY2(size.isValid(), qPrintable(errorMessage));
+
+    const DesktopCaptureResult first = capture->capture(true);
+    QCOMPARE(first.status, DesktopCaptureStatus::FrameReady);
+    QVERIFY2(first.frame.isValid(), qPrintable(first.errorMessage));
+    QVERIFY(first.frame.desktopSize == size);
+
+    const DesktopCaptureResult second = capture->capture(false);
+    QVERIFY2(second.status != DesktopCaptureStatus::Error,
+             qPrintable(second.errorMessage));
+    if (second.status == DesktopCaptureStatus::FrameReady) {
+        QVERIFY(second.frame.isValid());
+    }
+#else
+    QSKIP("Windows desktop capture is only available on Windows.");
+#endif
+}
+
+void RdpServerTest::connectsWithTlsAndReconnects()
 {
     QTcpServer portProbe;
     QVERIFY(portProbe.listen(QHostAddress::LocalHost, 0));
@@ -197,81 +381,34 @@ void RdpServerTest::connectsAndReceivesChangingFrames()
 
     RdpServer server;
     QVERIFY2(server.isInitialized(), qPrintable(server.lastError()));
+    QSignalSpy connectedSpy(&server, &RdpServer::clientConnected);
+    QSignalSpy disconnectedSpy(&server, &RdpServer::clientDisconnected);
 
     RdpServerConfiguration configuration;
     configuration.bindAddress = QStringLiteral("127.0.0.1");
     configuration.port = port;
     QVERIFY2(server.start(configuration), qPrintable(server.lastError()));
 
-    freerdp *client = freerdp_new();
-    QVERIFY(client);
-    bool contextCreated = false;
-    bool connected = false;
-    const auto cleanup = qScopeGuard([&]() {
-        if (connected) {
-            (void)freerdp_disconnect(client);
-        }
-        if (contextCreated) {
-            freerdp_context_free(client);
-        }
-        freerdp_free(client);
-        server.stop();
-    });
+    const TestConnectionResult firstConnection = connectAndReceiveFrames(port);
+    QVERIFY2(firstConnection.connected, qPrintable(firstConnection.error));
+    QVERIFY(firstConnection.tlsNegotiated);
+    QVERIFY2(firstConnection.frameCount >= 1, qPrintable(firstConnection.error));
+    QVERIFY(firstConnection.firstFrameHash != 0);
+    QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2000);
+    QTRY_COMPARE_WITH_TIMEOUT(disconnectedSpy.count(), 1, 2000);
+    QTRY_COMPARE_WITH_TIMEOUT(server.sessionCount(), qsizetype(0), 2000);
 
-    client->ContextSize = sizeof(TestClientContext);
-    client->PostConnect = testClientPostConnect;
-    client->PostDisconnect = testClientPostDisconnect;
-    QVERIFY(freerdp_context_new(client));
-    contextCreated = true;
+    const TestConnectionResult secondConnection = connectAndReceiveFrames(port);
+    QVERIFY2(secondConnection.connected, qPrintable(secondConnection.error));
+    QVERIFY(secondConnection.tlsNegotiated);
+    QVERIFY2(secondConnection.frameCount >= 1, qPrintable(secondConnection.error));
+    QVERIFY(secondConnection.firstFrameHash != 0);
+    QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 2, 2000);
+    QTRY_COMPARE_WITH_TIMEOUT(disconnectedSpy.count(), 2, 2000);
+    QTRY_COMPARE_WITH_TIMEOUT(server.sessionCount(), qsizetype(0), 2000);
 
-    rdpSettings *settings = client->context->settings;
-    QVERIFY(settings);
-    QVERIFY(freerdp_settings_set_string(settings, FreeRDP_ServerHostname, "127.0.0.1"));
-    QVERIFY(freerdp_settings_set_uint32(settings, FreeRDP_ServerPort, port));
-    QVERIFY(freerdp_settings_set_string(settings, FreeRDP_Username, "test"));
-    QVERIFY(freerdp_settings_set_string(settings, FreeRDP_Password, "test"));
-    QVERIFY(freerdp_settings_set_bool(settings, FreeRDP_Authentication, FALSE));
-    QVERIFY(freerdp_settings_set_bool(settings, FreeRDP_NegotiateSecurityLayer, TRUE));
-    QVERIFY(freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, TRUE));
-    QVERIFY(freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, FALSE));
-    QVERIFY(freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, FALSE));
-    QVERIFY(freerdp_settings_set_bool(settings, FreeRDP_ExtSecurity, FALSE));
-    QVERIFY(freerdp_settings_set_bool(settings, FreeRDP_UseRdpSecurityLayer, TRUE));
-    QVERIFY(freerdp_settings_set_bool(settings, FreeRDP_SoftwareGdi, TRUE));
-    QVERIFY(freerdp_settings_set_bool(settings, FreeRDP_NSCodec, TRUE));
-    QVERIFY(freerdp_settings_set_bool(settings, FreeRDP_NetworkAutoDetect, TRUE));
-    QVERIFY(freerdp_settings_set_bool(settings, FreeRDP_SupportMultitransport, TRUE));
-    QVERIFY(freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, 640));
-    QVERIFY(freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, 480));
-    QVERIFY(freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32));
-
-    QVERIFY2(freerdp_connect(client),
-             freerdp_get_last_error_name(freerdp_get_last_error(client->context)));
-    connected = true;
-
-    auto *testContext = reinterpret_cast<TestClientContext *>(client->context);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (testContext->frameCount < 3 && std::chrono::steady_clock::now() < deadline) {
-        std::array<HANDLE, 64> handles = {};
-        const DWORD handleCount = freerdp_get_event_handles(client->context,
-                                                            handles.data(),
-                                                            static_cast<DWORD>(handles.size()));
-        QVERIFY(handleCount > 0);
-
-        const DWORD waitResult = WaitForMultipleObjects(handleCount,
-                                                        handles.data(),
-                                                        FALSE,
-                                                        100);
-        QVERIFY(waitResult == WAIT_TIMEOUT || waitResult < WAIT_OBJECT_0 + handleCount);
-        if (waitResult != WAIT_TIMEOUT) {
-            QVERIFY2(freerdp_check_event_handles(client->context),
-                     freerdp_get_last_error_name(freerdp_get_last_error(client->context)));
-        }
-    }
-
-    QVERIFY(testContext->frameCount >= 3);
-    QVERIFY(testContext->firstFrameHash != 0);
-    QVERIFY(testContext->firstFrameHash != testContext->lastFrameHash);
+    server.stop();
+    QVERIFY(!server.isListening());
 }
 
 QTEST_GUILESS_MAIN(RdpServerTest)

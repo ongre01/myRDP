@@ -18,17 +18,23 @@ isEmpty(FREERDP_INSTALL_PREFIX) {
 
 include(../../qmake/freerdp.pri)
 
-win32: LIBS += -lws2_32
+win32: LIBS += -lws2_32 -lgdi32 -luser32
 
 INCLUDEPATH += ..
 
 SOURCES += \
     tst_rdpserver.cpp \
+    ../desktopcapture.cpp \
+    ../desktopframebuffer.cpp \
     ../rdpserver.cpp \
-    ../rdpserversession.cpp \
-    ../rdptestframe.cpp
+    ../rdpserversession.cpp
+
+win32: SOURCES += ../windowsdesktopcapture.cpp
 
 HEADERS += \
+    ../desktopcapture.h \
+    ../desktopframebuffer_p.h \
     ../rdpserver.h \
-    ../rdpserversession_p.h \
-    ../rdptestframe_p.h
+    ../rdpserversession_p.h
+
+win32: HEADERS += ../windowsdesktopcapture_p.h
