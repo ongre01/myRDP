@@ -13,17 +13,37 @@ FREERDP_COMPONENTS = \
 
 include(../qmake/freerdp.pri)
 
+win32: LIBS += -lws2_32
+
 SOURCES += \
+    clipboardtextcodec.cpp \
+    clipboarduibridge.cpp \
+    clientsettings.cpp \
+    inputeventtranslator.cpp \
     main.cpp \
     mainwindow.cpp \
-    rdpclient.cpp
+    rdpclient.cpp \
+    remotedesktopwidget.cpp
 
 HEADERS += \
+    clipboardtextcodec.h \
+    clipboarduibridge.h \
+    clientsettings.h \
+    inputeventtranslator.h \
     mainwindow.h \
-    rdpclient.h
+    rdpclient.h \
+    rdpinput.h \
+    remotedesktopwidget.h
 
 FORMS += \
     mainwindow.ui
+
+RDPCLIENT_INI = $$clean_path($$_PRO_FILE_PWD_/RDPClient.ini)
+PRE_TARGETDEPS += $$RDPCLIENT_INI
+QMAKE_POST_LINK += $$QMAKE_COPY $$quote($$shell_path($$RDPCLIENT_INI)) $$quote($(DESTDIR)) $$escape_expand(\\n\\t)
+
+DISTFILES += \
+    RDPClient.ini
 
 qnx: target.path = /tmp/$${TARGET}/bin
 else: unix:!android: target.path = /opt/$${TARGET}/bin

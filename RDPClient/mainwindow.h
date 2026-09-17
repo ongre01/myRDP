@@ -1,9 +1,11 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+#include "clipboarduibridge.h"
 #include "rdpclient.h"
 
 #include <QMainWindow>
+#include <QTimer>
 
 QT_BEGIN_NAMESPACE
 namespace Ui {
@@ -22,6 +24,7 @@ public:
 private slots:
     void connectToServer();
     void disconnectFromServer();
+    void processRdpEvents();
 
 private:
     enum class ConnectionUiState
@@ -34,8 +37,14 @@ private:
 
     void setConnectionUiState(ConnectionUiState state, const QString &message = QString());
     void showConnectionError(const QString &message);
+    void handleInputError();
+    CertificateDecision verifyServerCertificate(const CertificateInfo &certificate);
+    void displayDesktopUpdate(const DesktopUpdate &desktopUpdate);
 
     Ui::MainWindow *ui;
     RdpClient client;
+    QTimer rdpEventTimer;
+    ClipboardUiBridge clipboardUiBridge;
+    bool handlingInputError = false;
 };
 #endif // MAINWINDOW_H
