@@ -9,16 +9,25 @@ CONFIG -= c++11
 FREERDP_COMPONENTS = \
     freerdp-server \
     freerdp \
+    winpr-tools \
     winpr
 
 include(../qmake/freerdp.pri)
 
+win32: LIBS += -lws2_32
+
 SOURCES += \
     main.cpp \
-    mainwindow.cpp
+    mainwindow.cpp \
+    rdpserver.cpp \
+    rdpserversession.cpp \
+    rdptestframe.cpp
 
 HEADERS += \
-    mainwindow.h
+    mainwindow.h \
+    rdpserver.h \
+    rdpserversession_p.h \
+    rdptestframe_p.h
 
 FORMS += \
     mainwindow.ui

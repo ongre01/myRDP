@@ -6,24 +6,150 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>800</width>
-    <height>600</height>
+    <width>640</width>
+    <height>440</height>
    </rect>
   </property>
   <property name="windowTitle">
    <string>QtRdp Server</string>
   </property>
-  <widget class="QWidget" name="centralwidget"/>
-  <widget class="QMenuBar" name="menubar">
-   <property name="geometry">
-    <rect>
-     <x>0</x>
-     <y>0</y>
-     <width>800</width>
-     <height>21</height>
-    </rect>
-   </property>
+  <widget class="QWidget" name="centralwidget">
+   <layout class="QVBoxLayout" name="verticalLayout">
+    <item>
+     <widget class="QGroupBox" name="endpointGroupBox">
+      <property name="title">
+       <string>Listen endpoint</string>
+      </property>
+      <layout class="QGridLayout" name="endpointLayout">
+       <item row="0" column="0">
+        <widget class="QLabel" name="bindAddressTitleLabel">
+         <property name="text">
+          <string>Address</string>
+         </property>
+        </widget>
+       </item>
+       <item row="0" column="1">
+        <widget class="QLineEdit" name="bindAddressEdit">
+         <property name="text">
+          <string>0.0.0.0</string>
+         </property>
+         <property name="placeholderText">
+          <string>Empty means all interfaces</string>
+         </property>
+        </widget>
+       </item>
+       <item row="0" column="2">
+        <widget class="QLabel" name="portTitleLabel">
+         <property name="text">
+          <string>Port</string>
+         </property>
+        </widget>
+       </item>
+       <item row="0" column="3">
+        <widget class="QSpinBox" name="portSpinBox">
+         <property name="minimum">
+          <number>1</number>
+         </property>
+         <property name="maximum">
+          <number>65535</number>
+         </property>
+         <property name="value">
+          <number>3389</number>
+         </property>
+        </widget>
+       </item>
+       <item row="1" column="0" colspan="4">
+        <layout class="QHBoxLayout" name="buttonLayout">
+         <item>
+          <spacer name="buttonSpacer">
+           <property name="orientation">
+            <enum>Qt::Orientation::Horizontal</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>40</width>
+             <height>20</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+         <item>
+          <widget class="QPushButton" name="startButton">
+           <property name="text">
+            <string>Start</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="stopButton">
+           <property name="text">
+            <string>Stop</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+      </layout>
+     </widget>
+    </item>
+    <item>
+     <layout class="QHBoxLayout" name="statusLayout">
+      <item>
+       <widget class="QLabel" name="serverStateTitleLabel">
+        <property name="text">
+         <string>Server state:</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="serverStateLabel">
+        <property name="text">
+         <string>Stopped</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <spacer name="statusSpacer">
+        <property name="orientation">
+         <enum>Qt::Orientation::Horizontal</enum>
+        </property>
+        <property name="sizeHint" stdset="0">
+         <size>
+          <width>40</width>
+          <height>20</height>
+         </size>
+        </property>
+       </spacer>
+      </item>
+      <item>
+       <widget class="QLabel" name="clientCountTitleLabel">
+        <property name="text">
+         <string>Active sessions:</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="clientCountLabel">
+        <property name="text">
+         <string>0</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <widget class="QPlainTextEdit" name="eventLogEdit">
+      <property name="readOnly">
+       <bool>true</bool>
+      </property>
+      <property name="placeholderText">
+       <string>Server events appear here.</string>
+      </property>
+     </widget>
+    </item>
+   </layout>
   </widget>
+  <widget class="QMenuBar" name="menubar"/>
   <widget class="QStatusBar" name="statusbar"/>
  </widget>
  <resources/>
