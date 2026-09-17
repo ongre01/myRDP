@@ -17,6 +17,7 @@ win32: LIBS += -lws2_32
 
 SOURCES += \
     clipboardtextcodec.cpp \
+    clipboarduibridge.cpp \
     clientsettings.cpp \
     inputeventtranslator.cpp \
     main.cpp \
@@ -26,6 +27,7 @@ SOURCES += \
 
 HEADERS += \
     clipboardtextcodec.h \
+    clipboarduibridge.h \
     clientsettings.h \
     inputeventtranslator.h \
     mainwindow.h \

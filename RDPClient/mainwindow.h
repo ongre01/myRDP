@@ -1,6 +1,7 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+#include "clipboarduibridge.h"
 #include "rdpclient.h"
 
 #include <QMainWindow>
@@ -43,7 +44,7 @@ private:
     Ui::MainWindow *ui;
     RdpClient client;
     QTimer rdpEventTimer;
+    ClipboardUiBridge clipboardUiBridge;
     bool handlingInputError = false;
-    bool applyingRemoteClipboard = false;
 };
 #endif // MAINWINDOW_H

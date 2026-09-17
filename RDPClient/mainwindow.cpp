@@ -6,13 +6,13 @@
 #include <QClipboard>
 #include <QMessageBox>
 #include <QImage>
-#include <QScopedValueRollback>
 #include <QStatusBar>
 #include <QStringList>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
+    , clipboardUiBridge(QApplication::clipboard())
 {
     ui->setupUi(this);
 
@@ -33,20 +33,16 @@ MainWindow::MainWindow(QWidget *parent)
     client.setDesktopUpdateHandler(
         [this](const DesktopUpdate &desktopUpdate) { displayDesktopUpdate(desktopUpdate); });
     QClipboard *clipboard = QApplication::clipboard();
-    client.setClipboardTextHandler([this, clipboard](const QString &text) {
-        if (clipboard->text() == text) {
-            return;
-        }
-
-        QScopedValueRollback<bool> applyingClipboardText(applyingRemoteClipboard, true);
-        clipboard->setText(text);
+    client.setClipboardTextHandler([this](const QString &text) {
+        clipboardUiBridge.applyRemoteText(text);
     });
     connect(clipboard, &QClipboard::dataChanged, this, [this, clipboard]() {
-        if (applyingRemoteClipboard) {
+        const QString text = clipboard->text();
+        if (!clipboardUiBridge.shouldForwardLocalChange(text)) {
             return;
         }
 
-        if (!client.sendClipboardText(clipboard->text())) {
+        if (!client.sendClipboardText(text)) {
             handleInputError();
         }
     });
