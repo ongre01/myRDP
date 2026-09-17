@@ -1,6 +1,8 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+#include "rdpserver.h"
+
 #include <QMainWindow>
 
 QT_BEGIN_NAMESPACE
@@ -17,7 +19,15 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
 
+private slots:
+    void startServer();
+    void stopServer();
+
 private:
+    void appendLog(const QString &message);
+    void setServerUiState(bool listening);
+
     Ui::MainWindow *ui;
+    RdpServer server;
 };
 #endif // MAINWINDOW_H

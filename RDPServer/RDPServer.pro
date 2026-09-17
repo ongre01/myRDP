@@ -13,12 +13,18 @@ FREERDP_COMPONENTS = \
 
 include(../qmake/freerdp.pri)
 
+win32: LIBS += -lws2_32
+
 SOURCES += \
     main.cpp \
-    mainwindow.cpp
+    mainwindow.cpp \
+    rdpserver.cpp \
+    rdpserversession.cpp
 
 HEADERS += \
-    mainwindow.h
+    mainwindow.h \
+    rdpserver.h \
+    rdpserversession_p.h
 
 FORMS += \
     mainwindow.ui
