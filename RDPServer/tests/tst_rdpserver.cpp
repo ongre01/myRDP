@@ -3,9 +3,13 @@
 #include "desktopframebuffer_p.h"
 #include "inputcontroller.h"
 #include "rdpclipboardhandler_p.h"
+#include "rdpclient.h"
 #include "rdpinputhandler_p.h"
 #include "rdpserver.h"
 
+#include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QEventLoop>
 #include <QSignalSpy>
 #include <QScopeGuard>
 #include <QTcpServer>
@@ -24,10 +28,13 @@
 #include <freerdp/settings.h>
 #include <winpr/synch.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <vector>
 
 namespace {
@@ -386,6 +393,281 @@ TestConnectionResult connectAndReceiveFrames(quint16 port)
     }
     return result;
 }
+
+struct IntegrationState
+{
+    void recordInput(const RecordedInput &input)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        inputs.push_back(input);
+    }
+
+    bool hasExpectedInput() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto hasRecord = [this](const std::function<bool(const RecordedInput &)> &matches) {
+            return std::any_of(inputs.cbegin(), inputs.cend(), matches);
+        };
+        return hasRecord([](const RecordedInput &input) {
+                   return input.type == RecordedInputType::ScanCode && input.first == 0x1E
+                          && !input.releasedOrPressed;
+               })
+               && hasRecord([](const RecordedInput &input) {
+                   return input.type == RecordedInputType::PointerMove && input.first == 100
+                          && input.second == 120;
+               })
+               && hasRecord([](const RecordedInput &input) {
+                   return input.type == RecordedInputType::MouseButton
+                          && input.button == InputMouseButton::Left
+                          && input.releasedOrPressed;
+               })
+               && hasRecord([](const RecordedInput &input) {
+                   return input.type == RecordedInputType::MouseButton
+                          && input.button == InputMouseButton::Left
+                          && !input.releasedOrPressed;
+               })
+               && hasRecord([](const RecordedInput &input) {
+                   return input.type == RecordedInputType::Wheel
+                          && input.axis == InputWheelAxis::Vertical && input.first == -120;
+               });
+    }
+
+    bool clipboardEquals(const QString &expected, int minimumWrites) const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return clipboardWriteCount >= minimumWrites && clipboardHasText
+               && clipboardText == expected;
+    }
+
+    void setLocalClipboardText(const QString &text)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        clipboardText = text;
+        clipboardHasText = true;
+        ++clipboardSequence;
+    }
+
+    mutable std::mutex mutex;
+    std::vector<RecordedInput> inputs;
+    QString clipboardText;
+    quint64 clipboardSequence = 1;
+    bool clipboardHasText = false;
+    int clipboardWriteCount = 0;
+};
+
+class IntegrationDesktopCapture final : public DesktopCapture
+{
+public:
+    DesktopSize desktopSize(QString *) override
+    {
+        return size;
+    }
+
+    DesktopCaptureResult capture(bool forceFullFrame) override
+    {
+        DesktopFrame frame;
+        frame.desktopSize = size;
+        const bool fullFrame = forceFullFrame || frameNumber == 0;
+        if (fullFrame) {
+            frame.width = size.width;
+            frame.height = size.height;
+        } else {
+            frame.x = 32;
+            frame.y = 24;
+            frame.width = 16;
+            frame.height = 16;
+        }
+        frame.stride = frame.width * desktopCaptureBytesPerPixel;
+        frame.pixels.resize(static_cast<std::size_t>(frame.stride) * frame.height);
+
+        const std::uint8_t blue = fullFrame ? 0x31 : 0xC7;
+        const std::uint8_t green = static_cast<std::uint8_t>(0x40 + (frameNumber % 0x40));
+        for (std::size_t offset = 0; offset < frame.pixels.size(); offset += 4) {
+            frame.pixels[offset] = blue;
+            frame.pixels[offset + 1] = green;
+            frame.pixels[offset + 2] = 0xA5;
+            frame.pixels[offset + 3] = 0xFF;
+        }
+        ++frameNumber;
+        return {DesktopCaptureStatus::FrameReady, std::move(frame), {}};
+    }
+
+private:
+    const DesktopSize size{640, 480};
+    std::uint64_t frameNumber = 0;
+};
+
+class IntegrationInputController final : public InputController
+{
+public:
+    explicit IntegrationInputController(std::shared_ptr<IntegrationState> state)
+        : state(std::move(state))
+    {
+    }
+
+    bool sendScanCode(std::uint16_t scanCode,
+                      bool released,
+                      bool extended,
+                      QString *) override
+    {
+        state->recordInput(
+            {RecordedInputType::ScanCode, scanCode, 0, released, extended});
+        return true;
+    }
+
+    bool sendUnicodeCodeUnit(std::uint16_t codeUnit, bool released, QString *) override
+    {
+        state->recordInput({RecordedInputType::Unicode, codeUnit, 0, released});
+        return true;
+    }
+
+    bool movePointer(std::uint16_t x, std::uint16_t y, QString *) override
+    {
+        state->recordInput({RecordedInputType::PointerMove, x, y});
+        return true;
+    }
+
+    bool movePointerRelative(std::int16_t deltaX, std::int16_t deltaY, QString *) override
+    {
+        state->recordInput({RecordedInputType::RelativePointerMove, deltaX, deltaY});
+        return true;
+    }
+
+    bool setMouseButton(InputMouseButton button, bool pressed, QString *) override
+    {
+        RecordedInput input;
+        input.type = RecordedInputType::MouseButton;
+        input.releasedOrPressed = pressed;
+        input.button = button;
+        state->recordInput(input);
+        return true;
+    }
+
+    bool scroll(InputWheelAxis axis, std::int16_t delta, QString *) override
+    {
+        RecordedInput input;
+        input.type = RecordedInputType::Wheel;
+        input.first = delta;
+        input.axis = axis;
+        state->recordInput(input);
+        return true;
+    }
+
+private:
+    std::shared_ptr<IntegrationState> state;
+};
+
+class IntegrationClipboardController final : public ClipboardController
+{
+public:
+    explicit IntegrationClipboardController(std::shared_ptr<IntegrationState> state)
+        : state(std::move(state))
+    {
+    }
+
+    bool changeId(quint64 *id, QString *) const override
+    {
+        if (!id) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(state->mutex);
+        *id = state->clipboardSequence;
+        return true;
+    }
+
+    bool readText(QString *text, bool *hasText, QString *) const override
+    {
+        if (!text || !hasText) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(state->mutex);
+        *text = state->clipboardText;
+        *hasText = state->clipboardHasText;
+        return true;
+    }
+
+    bool writeText(const QString &text, QString *) override
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->clipboardText = text;
+        state->clipboardHasText = true;
+        ++state->clipboardSequence;
+        ++state->clipboardWriteCount;
+        return true;
+    }
+
+private:
+    std::shared_ptr<IntegrationState> state;
+};
+
+struct ClientObservations
+{
+    void addDesktopUpdate(const DesktopUpdate &update)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (desktopUpdates.size() < 32) {
+            desktopUpdates.push_back(update);
+        }
+    }
+
+    void addClipboardText(const QString &text)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        clipboardTexts.push_back(text);
+    }
+
+    bool receivedDesktopFrameAndRefresh() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        bool receivedFrame = false;
+        bool receivedRefresh = false;
+        for (const DesktopUpdate &update : desktopUpdates) {
+            const bool hasContent = std::any_of(update.pixels.cbegin(),
+                                                update.pixels.cend(),
+                                                [](char value) { return value != 0; });
+            receivedFrame = receivedFrame
+                            || (update.desktopSize == QSize(640, 480)
+                                && update.dirtyRect == QRect(0, 0, 640, 480) && hasContent);
+            receivedRefresh = receivedRefresh
+                              || (update.desktopSize == QSize(640, 480)
+                                  && update.dirtyRect == QRect(32, 24, 16, 16) && hasContent);
+        }
+        return receivedFrame && receivedRefresh;
+    }
+
+    bool receivedClipboardText(const QString &expected) const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return std::find(clipboardTexts.cbegin(), clipboardTexts.cend(), expected)
+               != clipboardTexts.cend();
+    }
+
+    void clearDesktopUpdates()
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        desktopUpdates.clear();
+    }
+
+    mutable std::mutex mutex;
+    std::vector<DesktopUpdate> desktopUpdates;
+    std::vector<QString> clipboardTexts;
+};
+
+bool processClientUntil(RdpClient &client,
+                        const std::function<bool()> &condition,
+                        int timeoutMs = 5000)
+{
+    QElapsedTimer timer;
+    timer.start();
+    while (!condition() && timer.elapsed() < timeoutMs) {
+        if (!client.processEvents()) {
+            return false;
+        }
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        QTest::qWait(10);
+    }
+    return condition();
+}
 } // namespace
 
 class RdpServerTest : public QObject
@@ -402,6 +684,7 @@ private slots:
     void synchronizesClipboardText();
     void createsClipboardController();
     void connectsWithTlsAndReconnects();
+    void integratesOwnClientAndServer();
 };
 
 void RdpServerTest::rejectsInvalidPort()
@@ -809,6 +1092,157 @@ void RdpServerTest::connectsWithTlsAndReconnects()
     QVERIFY2(secondConnection.frameCount >= 1, qPrintable(secondConnection.error));
     QVERIFY(secondConnection.firstFrameHash != 0);
     QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 2, 2000);
+    QTRY_COMPARE_WITH_TIMEOUT(disconnectedSpy.count(), 2, 2000);
+    QTRY_COMPARE_WITH_TIMEOUT(server.sessionCount(), qsizetype(0), 2000);
+
+    server.stop();
+    QVERIFY(!server.isListening());
+}
+
+void RdpServerTest::integratesOwnClientAndServer()
+{
+    QTcpServer portProbe;
+    QVERIFY(portProbe.listen(QHostAddress::LocalHost, 0));
+    const quint16 port = portProbe.serverPort();
+    portProbe.close();
+
+    const auto integrationState = std::make_shared<IntegrationState>();
+    RdpServerDependencies dependencies;
+    dependencies.desktopCaptureFactory = []() {
+        return std::make_unique<IntegrationDesktopCapture>();
+    };
+    dependencies.inputControllerFactory = [integrationState]() {
+        return std::make_unique<IntegrationInputController>(integrationState);
+    };
+    dependencies.clipboardControllerFactory = [integrationState]() {
+        return std::make_unique<IntegrationClipboardController>(integrationState);
+    };
+
+    RdpServer server(std::move(dependencies));
+    QVERIFY2(server.isInitialized(), qPrintable(server.lastError()));
+    QSignalSpy connectedSpy(&server, &RdpServer::clientConnected);
+    QSignalSpy disconnectedSpy(&server, &RdpServer::clientDisconnected);
+
+    RdpServerConfiguration configuration;
+    configuration.bindAddress = QStringLiteral("127.0.0.1");
+    configuration.port = port;
+    QVERIFY2(server.start(configuration), qPrintable(server.lastError()));
+
+    ConnectionInfo connectionInfo;
+    connectionInfo.serverAddress = QStringLiteral("127.0.0.1");
+    connectionInfo.port = port;
+    connectionInfo.username = QStringLiteral("integration-user");
+    connectionInfo.password = QStringLiteral("integration-password");
+
+    bool rejectionPrompted = false;
+    CertificateInfo rejectedCertificate;
+    connectionInfo.certificateVerifier = [&](const CertificateInfo &certificate) {
+        rejectionPrompted = true;
+        rejectedCertificate = certificate;
+        return CertificateDecision::Reject;
+    };
+    {
+        RdpClient rejectingClient;
+        QVERIFY2(rejectingClient.isInitialized(), qPrintable(rejectingClient.lastError()));
+        QVERIFY(!rejectingClient.connectToServer(connectionInfo));
+        QVERIFY(rejectionPrompted);
+        QVERIFY(!rejectedCertificate.fingerprint.isEmpty());
+        QVERIFY(rejectingClient.lastError().contains(QStringLiteral("rejected"),
+                                                     Qt::CaseInsensitive));
+    }
+    QTRY_VERIFY_WITH_TIMEOUT(connectedSpy.count() >= 1, 2000);
+    QTRY_VERIFY_WITH_TIMEOUT(disconnectedSpy.count() >= 1, 2000);
+    QTRY_COMPARE_WITH_TIMEOUT(server.sessionCount(), qsizetype(0), 2000);
+    connectedSpy.clear();
+    disconnectedSpy.clear();
+
+    ClientObservations observations;
+    RdpClient client;
+    QVERIFY2(client.isInitialized(), qPrintable(client.lastError()));
+    client.setDesktopUpdateHandler(
+        [&](const DesktopUpdate &update) { observations.addDesktopUpdate(update); });
+    client.setClipboardTextHandler(
+        [&](const QString &text) { observations.addClipboardText(text); });
+
+    const QString clientClipboardText = QStringLiteral("Client → Server\n한글 clipboard");
+    QVERIFY(client.sendClipboardText(clientClipboardText));
+
+    int certificateApprovalCount = 0;
+    CertificateInfo trustedCertificate;
+    connectionInfo.certificateVerifier = [&](const CertificateInfo &certificate) {
+        ++certificateApprovalCount;
+        trustedCertificate = certificate;
+        return CertificateDecision::TrustOnce;
+    };
+
+    QVERIFY2(client.connectToServer(connectionInfo), qPrintable(client.lastError()));
+    QVERIFY(client.isConnected());
+    QCOMPARE(certificateApprovalCount, 1);
+    QCOMPARE(trustedCertificate.host, QStringLiteral("127.0.0.1"));
+    QCOMPARE(trustedCertificate.port, static_cast<int>(port));
+    QVERIFY(!trustedCertificate.fingerprint.isEmpty());
+    QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2000);
+
+    QVERIFY2(processClientUntil(client, [&]() {
+                 return observations.receivedDesktopFrameAndRefresh();
+             }),
+             qPrintable(client.lastError() + QStringLiteral(" / ") + server.lastError()));
+
+    RdpKeyboardInput keyboardInput;
+    keyboardInput.kind = RdpKeyboardInput::Kind::ScanCode;
+    keyboardInput.scanCode = 0x1E;
+    keyboardInput.pressed = true;
+    QVERIFY2(client.sendKeyboardInput(keyboardInput), qPrintable(client.lastError()));
+
+    RdpPointerInput pointerInput;
+    pointerInput.kind = RdpPointerInput::Kind::Move;
+    pointerInput.position = QPoint(100, 120);
+    QVERIFY2(client.sendPointerInput(pointerInput), qPrintable(client.lastError()));
+    pointerInput.kind = RdpPointerInput::Kind::LeftButton;
+    pointerInput.pressed = true;
+    QVERIFY2(client.sendPointerInput(pointerInput), qPrintable(client.lastError()));
+    pointerInput.pressed = false;
+    QVERIFY2(client.sendPointerInput(pointerInput), qPrintable(client.lastError()));
+    pointerInput.kind = RdpPointerInput::Kind::VerticalWheel;
+    pointerInput.wheelDelta = -120;
+    QVERIFY2(client.sendPointerInput(pointerInput), qPrintable(client.lastError()));
+
+    QVERIFY2(processClientUntil(client, [&]() { return integrationState->hasExpectedInput(); }),
+             qPrintable(client.lastError()));
+    QVERIFY2(processClientUntil(client, [&]() {
+                 return integrationState->clipboardEquals(clientClipboardText, 1);
+             }),
+             qPrintable(client.lastError()));
+
+    const QString serverClipboardText = QStringLiteral("Server → Client\n양방향 clipboard");
+    integrationState->setLocalClipboardText(serverClipboardText);
+    QVERIFY2(processClientUntil(client, [&]() {
+                 return observations.receivedClipboardText(serverClipboardText);
+             }),
+             qPrintable(client.lastError()));
+
+    client.disconnect();
+    QVERIFY(!client.isConnected());
+    QVERIFY2(client.lastError().isEmpty(), qPrintable(client.lastError()));
+    QTRY_COMPARE_WITH_TIMEOUT(disconnectedSpy.count(), 1, 2000);
+    QTRY_COMPARE_WITH_TIMEOUT(server.sessionCount(), qsizetype(0), 2000);
+
+    const QString reconnectClipboardText = QStringLiteral("reconnected client clipboard");
+    QVERIFY(client.sendClipboardText(reconnectClipboardText));
+    observations.clearDesktopUpdates();
+    QVERIFY2(client.connectToServer(connectionInfo), qPrintable(client.lastError()));
+    QVERIFY(client.isConnected());
+    QVERIFY(certificateApprovalCount >= 1);
+    QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 2, 2000);
+    QVERIFY2(processClientUntil(client, [&]() {
+                 return observations.receivedDesktopFrameAndRefresh()
+                        && integrationState->clipboardEquals(reconnectClipboardText, 2);
+             }),
+             qPrintable(client.lastError()));
+
+    client.disconnect();
+    QVERIFY(!client.isConnected());
+    QVERIFY2(client.lastError().isEmpty(), qPrintable(client.lastError()));
     QTRY_COMPARE_WITH_TIMEOUT(disconnectedSpy.count(), 2, 2000);
     QTRY_COMPARE_WITH_TIMEOUT(server.sessionCount(), qsizetype(0), 2000);
 

@@ -7,6 +7,7 @@ CONFIG += c++17 console testcase warn_on
 CONFIG -= app_bundle c++11
 
 FREERDP_COMPONENTS = \
+    freerdp-client \
     freerdp-server \
     freerdp \
     winpr-tools \
@@ -20,10 +21,14 @@ include(../../qmake/freerdp.pri)
 
 win32: LIBS += -lws2_32 -lgdi32 -luser32
 
-INCLUDEPATH += ..
+INCLUDEPATH += \
+    .. \
+    ../../RDPClient
 
 SOURCES += \
     tst_rdpserver.cpp \
+    ../../RDPClient/clipboardtextcodec.cpp \
+    ../../RDPClient/rdpclient.cpp \
     ../clipboardcontroller.cpp \
     ../desktopcapture.cpp \
     ../desktopframebuffer.cpp \
@@ -39,6 +44,9 @@ win32: SOURCES += \
     ../windowsinputcontroller.cpp
 
 HEADERS += \
+    ../../RDPClient/clipboardtextcodec.h \
+    ../../RDPClient/rdpclient.h \
+    ../../RDPClient/rdpinput.h \
     ../clipboardcontroller.h \
     ../desktopcapture.h \
     ../desktopframebuffer_p.h \

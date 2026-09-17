@@ -228,6 +228,9 @@ BOOL RdpServerSession::peerActivate(freerdp_peer *peer)
     if (!session) {
         return FALSE;
     }
+    if (!session->initializeClipboardChannel()) {
+        return FALSE;
+    }
 
     session->fullFrameRequested.store(true);
     session->activated.store(true);
@@ -478,7 +481,7 @@ bool RdpServerSession::handlePostConnect()
     if (!applyDesktopSize(size, true)) {
         return false;
     }
-    return initializeClipboardChannel();
+    return true;
 }
 
 bool RdpServerSession::initializePeer()
@@ -531,13 +534,6 @@ bool RdpServerSession::initializePeer()
     }
     peerInitialized = true;
     if (!peer->context || !peer->context->settings || !peer->context->input) {
-        return false;
-    }
-
-    virtualChannelManager = WTSOpenServerA(reinterpret_cast<LPSTR>(peer->context));
-    if (!virtualChannelManager || virtualChannelManager == INVALID_HANDLE_VALUE) {
-        virtualChannelManager = nullptr;
-        reportError(QStringLiteral("Failed to create the RDP virtual channel manager."));
         return false;
     }
 
@@ -649,15 +645,21 @@ bool RdpServerSession::initializeClipboardChannel()
     if (clipboardStarted || clipboardContext) {
         return true;
     }
-    if (!virtualChannelManager) {
-        reportError(QStringLiteral("The RDP virtual channel manager is not initialized."));
+    if (!peer || !peer->context) {
+        reportError(QStringLiteral("The RDP peer is not initialized for clipboard redirection."));
         return false;
     }
-    if (!WTSVirtualChannelManagerIsChannelJoined(virtualChannelManager,
-                                                 CLIPRDR_SVC_CHANNEL_NAME)) {
+    if (!WTSIsChannelJoinedByName(peer, CLIPRDR_SVC_CHANNEL_NAME)) {
         return true;
     }
-
+    if (!virtualChannelManager) {
+        virtualChannelManager = WTSOpenServerA(reinterpret_cast<LPSTR>(peer->context));
+        if (!virtualChannelManager || virtualChannelManager == INVALID_HANDLE_VALUE) {
+            virtualChannelManager = nullptr;
+            reportError(QStringLiteral("Failed to create the RDP virtual channel manager."));
+            return false;
+        }
+    }
     clipboardContext = cliprdr_server_context_new(virtualChannelManager);
     if (!clipboardContext) {
         reportError(QStringLiteral("Failed to create the FreeRDP clipboard channel."));
@@ -669,6 +671,7 @@ bool RdpServerSession::initializeClipboardChannel()
     clipboardContext->streamFileClipEnabled = FALSE;
     clipboardContext->fileClipNoFilePaths = FALSE;
     clipboardContext->canLockClipData = FALSE;
+    clipboardContext->autoInitializationSequence = TRUE;
     clipboardContext->ClientCapabilities = clipboardClientCapabilities;
     clipboardContext->ClientFormatList = clipboardClientFormatList;
     clipboardContext->ClientFormatListResponse = clipboardClientFormatListResponse;
@@ -937,26 +940,50 @@ void RdpServerSession::run()
 
         while (!stopRequested.load()) {
             std::array<HANDLE, MAXIMUM_WAIT_OBJECTS> handles = {};
+            const bool hasVirtualChannelManager = virtualChannelManager != nullptr;
+            const DWORD maximumPeerHandles = static_cast<DWORD>(
+                handles.size() - (hasVirtualChannelManager ? 1 : 0));
             const DWORD handleCount = peer->GetEventHandles
                                           ? peer->GetEventHandles(peer,
                                                                   handles.data(),
-                                                                  static_cast<DWORD>(handles.size()))
+                                                                  maximumPeerHandles)
                                           : 0;
             if (handleCount == 0) {
                 break;
             }
 
-            const DWORD waitResult = WaitForMultipleObjects(handleCount,
-                                                            handles.data(),
-                                                            FALSE,
-                                                            eventPollIntervalMs);
+            DWORD totalHandleCount = handleCount;
+            DWORD virtualChannelHandleIndex = MAXIMUM_WAIT_OBJECTS;
+            if (hasVirtualChannelManager) {
+                const HANDLE channelEvent =
+                    WTSVirtualChannelManagerGetEventHandle(virtualChannelManager);
+                if (!channelEvent) {
+                    break;
+                }
+                virtualChannelHandleIndex = totalHandleCount;
+                handles[totalHandleCount++] = channelEvent;
+            }
+
+            const DWORD waitResult = WaitForMultipleObjects(totalHandleCount,
+                                                             handles.data(),
+                                                             FALSE,
+                                                             eventPollIntervalMs);
             if (waitResult == WAIT_FAILED) {
                 break;
             }
             if (waitResult != WAIT_TIMEOUT) {
-                if (waitResult >= WAIT_OBJECT_0 + handleCount
-                    || !peer->CheckFileDescriptor
-                    || !peer->CheckFileDescriptor(peer)) {
+                if (waitResult >= WAIT_OBJECT_0 + totalHandleCount) {
+                    break;
+                }
+
+                const DWORD signaledHandle = waitResult - WAIT_OBJECT_0;
+                if (signaledHandle == virtualChannelHandleIndex) {
+                    if (!WTSVirtualChannelManagerCheckFileDescriptorEx(
+                            virtualChannelManager, FALSE)) {
+                        break;
+                    }
+                } else if (!peer->CheckFileDescriptor
+                           || !peer->CheckFileDescriptor(peer)) {
                     break;
                 }
             }
