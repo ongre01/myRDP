@@ -26,15 +26,23 @@ SOURCES += \
     tst_rdpserver.cpp \
     ../desktopcapture.cpp \
     ../desktopframebuffer.cpp \
+    ../inputcontroller.cpp \
+    ../rdpinputhandler.cpp \
     ../rdpserver.cpp \
     ../rdpserversession.cpp
 
-win32: SOURCES += ../windowsdesktopcapture.cpp
+win32: SOURCES += \
+    ../windowsdesktopcapture.cpp \
+    ../windowsinputcontroller.cpp
 
 HEADERS += \
     ../desktopcapture.h \
     ../desktopframebuffer_p.h \
+    ../inputcontroller.h \
+    ../rdpinputhandler_p.h \
     ../rdpserver.h \
     ../rdpserversession_p.h
 
-win32: HEADERS += ../windowsdesktopcapture_p.h
+win32: HEADERS += \
+    ../windowsdesktopcapture_p.h \
+    ../windowsinputcontroller_p.h

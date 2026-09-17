@@ -1,5 +1,7 @@
 #include "rdpserversession_p.h"
 
+#include "rdpinputhandler_p.h"
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -10,6 +12,7 @@
 #include <freerdp/crypto/certificate.h>
 #include <freerdp/crypto/privatekey.h>
 #include <freerdp/freerdp.h>
+#include <freerdp/input.h>
 #include <freerdp/peer.h>
 #include <freerdp/settings.h>
 #include <freerdp/update.h>
@@ -116,19 +119,26 @@ RdpServerSession *sessionForPeer(freerdp_peer *peer)
 {
     return peer ? static_cast<RdpServerSession *>(peer->ContextExtra) : nullptr;
 }
+
+RdpServerSession *sessionForInput(rdpInput *input)
+{
+    return input && input->context ? sessionForPeer(input->context->peer) : nullptr;
+}
 } // namespace
 
 RdpServerSession::RdpServerSession(quint64 id,
                                    freerdp_peer *peer,
                                    ClosedHandler closedHandler,
                                    ErrorHandler errorHandler,
-                                   DesktopCaptureFactory captureFactory)
+                                   DesktopCaptureFactory captureFactory,
+                                   InputControllerFactory inputFactory)
     : sessionId(id)
     , peer(peer)
     , address(peer ? QString::fromUtf8(peer->hostname) : QString())
     , closedHandler(std::move(closedHandler))
     , errorHandler(std::move(errorHandler))
     , captureFactory(std::move(captureFactory))
+    , inputFactory(std::move(inputFactory))
 {
 }
 
@@ -213,6 +223,97 @@ BOOL RdpServerSession::peerActivate(freerdp_peer *peer)
     return TRUE;
 }
 
+BOOL RdpServerSession::inputKeyboardEvent(rdpInput *input, UINT16 flags, UINT8 code)
+{
+    RdpServerSession *session = sessionForInput(input);
+    if (!session || !session->inputHandler) {
+        return FALSE;
+    }
+
+    QString errorMessage;
+    if (!session->inputHandler->keyboardEvent(flags, code, &errorMessage)) {
+        session->reportError(errorMessage.isEmpty()
+                                 ? QStringLiteral("Failed to apply remote keyboard input.")
+                                 : errorMessage);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+BOOL RdpServerSession::inputUnicodeKeyboardEvent(rdpInput *input, UINT16 flags, UINT16 code)
+{
+    RdpServerSession *session = sessionForInput(input);
+    if (!session || !session->inputHandler) {
+        return FALSE;
+    }
+
+    QString errorMessage;
+    if (!session->inputHandler->unicodeKeyboardEvent(flags, code, &errorMessage)) {
+        session->reportError(errorMessage.isEmpty()
+                                 ? QStringLiteral("Failed to apply remote Unicode keyboard input.")
+                                 : errorMessage);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+BOOL RdpServerSession::inputMouseEvent(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y)
+{
+    RdpServerSession *session = sessionForInput(input);
+    if (!session || !session->inputHandler) {
+        return FALSE;
+    }
+
+    QString errorMessage;
+    if (!session->inputHandler->mouseEvent(flags, x, y, &errorMessage)) {
+        session->reportError(errorMessage.isEmpty()
+                                 ? QStringLiteral("Failed to apply remote mouse input.")
+                                 : errorMessage);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+BOOL RdpServerSession::inputRelativeMouseEvent(rdpInput *input,
+                                               UINT16 flags,
+                                               INT16 deltaX,
+                                               INT16 deltaY)
+{
+    RdpServerSession *session = sessionForInput(input);
+    if (!session || !session->inputHandler) {
+        return FALSE;
+    }
+
+    QString errorMessage;
+    if (!session->inputHandler->relativeMouseEvent(flags, deltaX, deltaY, &errorMessage)) {
+        session->reportError(errorMessage.isEmpty()
+                                 ? QStringLiteral("Failed to apply remote relative mouse input.")
+                                 : errorMessage);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+BOOL RdpServerSession::inputExtendedMouseEvent(rdpInput *input,
+                                               UINT16 flags,
+                                               UINT16 x,
+                                               UINT16 y)
+{
+    RdpServerSession *session = sessionForInput(input);
+    if (!session || !session->inputHandler) {
+        return FALSE;
+    }
+
+    QString errorMessage;
+    if (!session->inputHandler->extendedMouseEvent(flags, x, y, &errorMessage)) {
+        session->reportError(errorMessage.isEmpty()
+                                 ? QStringLiteral("Failed to apply remote extended mouse input.")
+                                 : errorMessage);
+        return FALSE;
+    }
+    return TRUE;
+}
+
 bool RdpServerSession::handlePostConnect()
 {
     if (!desktopCapture) {
@@ -243,6 +344,13 @@ bool RdpServerSession::initializePeer()
         return false;
     }
 
+    inputController = inputFactory ? inputFactory() : nullptr;
+    if (!inputController) {
+        reportError(QStringLiteral("Remote input is not available on this platform."));
+        return false;
+    }
+    inputHandler = std::make_unique<RdpInputHandler>(*inputController);
+
     QString captureError;
     const DesktopSize captureSize = desktopCapture->desktopSize(&captureError);
     if (!captureSize.isValid()
@@ -255,10 +363,13 @@ bool RdpServerSession::initializePeer()
     }
 
     peer->ContextExtra = this;
-    if (!freerdp_peer_context_new(peer) || !peer->context || !peer->context->settings) {
+    if (!freerdp_peer_context_new(peer)) {
         return false;
     }
     peerInitialized = true;
+    if (!peer->context || !peer->context->settings || !peer->context->input) {
+        return false;
+    }
 
     rdpSettings *settings = peer->context->settings;
     const TestServerCredentials &credentials = testServerCredentials();
@@ -300,6 +411,9 @@ bool RdpServerSession::initializePeer()
         || !freerdp_settings_set_uint32(settings,
                                         FreeRDP_MultifragMaxRequestSize,
                                         0x00FFFFFF)
+        || !freerdp_settings_set_bool(settings, FreeRDP_HasHorizontalWheel, TRUE)
+        || !freerdp_settings_set_bool(settings, FreeRDP_HasExtendedMouseEvent, TRUE)
+        || !freerdp_settings_set_bool(settings, FreeRDP_HasRelativeMouseEvent, TRUE)
         || !freerdp_settings_set_bool(settings, FreeRDP_SuppressOutput, FALSE)
         || !freerdp_settings_set_bool(settings, FreeRDP_RefreshRect, FALSE)) {
         return false;
@@ -317,6 +431,12 @@ bool RdpServerSession::initializePeer()
 
     peer->PostConnect = peerPostConnect;
     peer->Activate = peerActivate;
+    rdpInput *input = peer->context->input;
+    input->KeyboardEvent = inputKeyboardEvent;
+    input->UnicodeKeyboardEvent = inputUnicodeKeyboardEvent;
+    input->MouseEvent = inputMouseEvent;
+    input->RelMouseEvent = inputRelativeMouseEvent;
+    input->ExtendedMouseEvent = inputExtendedMouseEvent;
     return peer->Initialize && peer->Initialize(peer);
 }
 
@@ -342,6 +462,8 @@ void RdpServerSession::cleanupPeer()
     if (peer) {
         peer->ContextExtra = nullptr;
     }
+    inputHandler.reset();
+    inputController.reset();
     desktopCapture.reset();
 }
 

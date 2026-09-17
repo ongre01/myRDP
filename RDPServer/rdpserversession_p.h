@@ -2,6 +2,7 @@
 #define RDPSERVERSESSION_P_H
 
 #include "desktopcapture.h"
+#include "inputcontroller.h"
 
 #include <QString>
 #include <QtTypes>
@@ -15,8 +16,11 @@
 
 struct rdp_freerdp_peer;
 using freerdp_peer = struct rdp_freerdp_peer;
+struct rdp_input;
+using rdpInput = struct rdp_input;
 struct S_NSC_CONTEXT;
 using NSC_CONTEXT = struct S_NSC_CONTEXT;
+class RdpInputHandler;
 
 class RdpServerSession final
 {
@@ -28,7 +32,8 @@ public:
                      freerdp_peer *peer,
                      ClosedHandler closedHandler,
                      ErrorHandler errorHandler,
-                     DesktopCaptureFactory captureFactory = createDesktopCapture);
+                     DesktopCaptureFactory captureFactory = createDesktopCapture,
+                     InputControllerFactory inputFactory = createInputController);
     ~RdpServerSession();
 
     RdpServerSession(const RdpServerSession &) = delete;
@@ -46,6 +51,14 @@ public:
 private:
     static BOOL peerPostConnect(freerdp_peer *peer);
     static BOOL peerActivate(freerdp_peer *peer);
+    static BOOL inputKeyboardEvent(rdpInput *input, UINT16 flags, UINT8 code);
+    static BOOL inputUnicodeKeyboardEvent(rdpInput *input, UINT16 flags, UINT16 code);
+    static BOOL inputMouseEvent(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y);
+    static BOOL inputRelativeMouseEvent(rdpInput *input,
+                                        UINT16 flags,
+                                        INT16 deltaX,
+                                        INT16 deltaY);
+    static BOOL inputExtendedMouseEvent(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y);
 
     bool handlePostConnect();
     bool initializePeer();
@@ -61,7 +74,10 @@ private:
     ClosedHandler closedHandler;
     ErrorHandler errorHandler;
     DesktopCaptureFactory captureFactory;
+    InputControllerFactory inputFactory;
     std::unique_ptr<DesktopCapture> desktopCapture;
+    std::unique_ptr<InputController> inputController;
+    std::unique_ptr<RdpInputHandler> inputHandler;
     bool ownsPeer = false;
     bool started = false;
     bool peerInitialized = false;
