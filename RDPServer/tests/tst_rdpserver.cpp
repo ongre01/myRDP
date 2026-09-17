@@ -1,6 +1,8 @@
+#include "clipboardcontroller.h"
 #include "desktopcapture.h"
 #include "desktopframebuffer_p.h"
 #include "inputcontroller.h"
+#include "rdpclipboardhandler_p.h"
 #include "rdpinputhandler_p.h"
 #include "rdpserver.h"
 
@@ -11,6 +13,7 @@
 #include <QTest>
 
 #if defined(Q_OS_WIN)
+#include "windowsclipboardcontroller_p.h"
 #include "windowsinputcontroller_p.h"
 #endif
 
@@ -119,6 +122,74 @@ public:
 
     std::vector<RecordedInput> records;
     bool failNext = false;
+};
+
+class RecordingClipboardController final : public ClipboardController
+{
+public:
+    bool changeId(quint64 *id, QString *errorMessage) const override
+    {
+        if (failChangeId || !id) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("Clipboard change id failed.");
+            }
+            return false;
+        }
+        *id = sequence;
+        return true;
+    }
+
+    bool readText(QString *text,
+                  bool *available,
+                  QString *errorMessage) const override
+    {
+        if (failRead || !text || !available) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("Clipboard read failed.");
+            }
+            return false;
+        }
+        *text = value;
+        *available = hasText;
+        return true;
+    }
+
+    bool writeText(const QString &text, QString *errorMessage) override
+    {
+        if (failWrite) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("Clipboard write failed.");
+            }
+            return false;
+        }
+        value = text;
+        hasText = true;
+        ++sequence;
+        ++writeCount;
+        return true;
+    }
+
+    void setLocalText(const QString &text)
+    {
+        value = text;
+        hasText = true;
+        ++sequence;
+    }
+
+    void removeLocalText()
+    {
+        value.clear();
+        hasText = false;
+        ++sequence;
+    }
+
+    quint64 sequence = 1;
+    QString value;
+    bool hasText = false;
+    bool failChangeId = false;
+    bool failRead = false;
+    bool failWrite = false;
+    int writeCount = 0;
 };
 
 struct TestClientContext
@@ -328,6 +399,8 @@ private slots:
     void capturesWindowsDesktop();
     void routesRdpInputEvents();
     void convertsWindowsInputEvents();
+    void synchronizesClipboardText();
+    void createsClipboardController();
     void connectsWithTlsAndReconnects();
 };
 
@@ -633,6 +706,74 @@ void RdpServerTest::convertsWindowsInputEvents()
     QVERIFY(errorMessage.contains(QStringLiteral("Windows error 5")));
 #else
     QSKIP("Windows input injection is only available on Windows.");
+#endif
+}
+
+void RdpServerTest::synchronizesClipboardText()
+{
+    RecordingClipboardController controller;
+    controller.setLocalText(QStringLiteral("initial"));
+    RdpClipboardHandler handler(controller);
+    QString errorMessage;
+    QVERIFY(handler.initialize(&errorMessage));
+
+    ClipboardTextState state;
+    QCOMPARE(handler.pollLocalClipboard(&state, &errorMessage),
+             ClipboardPollStatus::Unchanged);
+
+    const QString localText = QString::fromUtf8("서버 clipboard\n두 번째 줄");
+    controller.setLocalText(localText);
+    QCOMPARE(handler.pollLocalClipboard(&state, &errorMessage),
+             ClipboardPollStatus::Changed);
+    QVERIFY(state.hasText);
+    QCOMPARE(state.text, localText);
+
+    QByteArray encoded;
+    QVERIFY(handler.encodedLocalText(&encoded, &errorMessage));
+    QVERIFY(encoded.endsWith(QByteArray::fromHex("0000")));
+    QVERIFY(encoded.contains(QByteArray::fromHex("0d000a00")));
+    bool decodedSuccessfully = false;
+    QCOMPARE(RdpClipboardHandler::decodeUtf16Le(encoded, &decodedSuccessfully), localText);
+    QVERIFY(decodedSuccessfully);
+
+    const QString remoteText = QString::fromUtf8("client → server ✓\nline 2");
+    QVERIFY(handler.applyRemoteText(RdpClipboardHandler::encodeUtf16Le(remoteText),
+                                    &errorMessage));
+    QCOMPARE(controller.value, remoteText);
+    QCOMPARE(controller.writeCount, 1);
+    QCOMPARE(handler.pollLocalClipboard(&state, &errorMessage),
+             ClipboardPollStatus::Unchanged);
+
+    QVERIFY(!handler.applyRemoteText(QByteArray::fromHex("410000"), &errorMessage));
+    QVERIFY(!errorMessage.isEmpty());
+
+    controller.removeLocalText();
+    errorMessage.clear();
+    QCOMPARE(handler.pollLocalClipboard(&state, &errorMessage),
+             ClipboardPollStatus::Changed);
+    QVERIFY(!state.hasText);
+
+    QVERIFY(handler.clearRemoteText(&errorMessage));
+    QCOMPARE(controller.value, QString());
+    QCOMPARE(controller.writeCount, 2);
+    QCOMPARE(handler.pollLocalClipboard(&state, &errorMessage),
+             ClipboardPollStatus::Unchanged);
+
+    controller.setLocalText(QStringLiteral("unreadable"));
+    controller.failRead = true;
+    QCOMPARE(handler.pollLocalClipboard(&state, &errorMessage),
+             ClipboardPollStatus::Error);
+    QVERIFY(!errorMessage.isEmpty());
+}
+
+void RdpServerTest::createsClipboardController()
+{
+#if defined(Q_OS_WIN)
+    std::unique_ptr<ClipboardController> controller = createClipboardController();
+    QVERIFY(controller);
+    QVERIFY(dynamic_cast<WindowsClipboardController *>(controller.get()));
+#else
+    QVERIFY(!createClipboardController());
 #endif
 }
 
