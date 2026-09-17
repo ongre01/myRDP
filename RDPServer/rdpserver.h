@@ -1,6 +1,10 @@
 #ifndef RDPSERVER_H
 #define RDPSERVER_H
 
+#include "clipboardcontroller.h"
+#include "desktopcapture.h"
+#include "inputcontroller.h"
+
 #include <QObject>
 #include <QString>
 
@@ -12,12 +16,20 @@ struct RdpServerConfiguration
     quint16 port = 3389;
 };
 
+struct RdpServerDependencies
+{
+    DesktopCaptureFactory desktopCaptureFactory = createDesktopCapture;
+    InputControllerFactory inputControllerFactory = createInputController;
+    ClipboardControllerFactory clipboardControllerFactory = createClipboardController;
+};
+
 class RdpServer : public QObject
 {
     Q_OBJECT
 
 public:
     explicit RdpServer(QObject *parent = nullptr);
+    explicit RdpServer(RdpServerDependencies dependencies, QObject *parent = nullptr);
     ~RdpServer() override;
 
     bool start(const RdpServerConfiguration &configuration);

@@ -599,7 +599,8 @@ private:
 
         rdpSettings *settings = instance->context->settings;
         if (!freerdp_settings_set_bool(settings, FreeRDP_SoftwareGdi, TRUE)
-            || !freerdp_settings_set_bool(settings, FreeRDP_DesktopResize, TRUE)) {
+            || !freerdp_settings_set_bool(settings, FreeRDP_DesktopResize, TRUE)
+            || !freerdp_settings_set_bool(settings, FreeRDP_NSCodec, TRUE)) {
             return FALSE;
         }
 
@@ -645,6 +646,12 @@ private:
         Impl *implementation = owner(instance);
         if (implementation) {
             implementation->unsubscribeChannelEvents();
+        }
+        if (instance && instance->context && instance->context->update) {
+            rdpUpdate *update = instance->context->update;
+            update->BeginPaint = nullptr;
+            update->EndPaint = nullptr;
+            update->DesktopResize = nullptr;
         }
         gdi_free(instance);
     }

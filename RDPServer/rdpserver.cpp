@@ -8,9 +8,11 @@
 #include <QFileInfo>
 #include <QLibrary>
 
+#include <freerdp/channels/channels.h>
 #include <freerdp/listener.h>
 #include <winpr/synch.h>
 #include <winpr/winsock.h>
+#include <winpr/wtsapi.h>
 
 #include <array>
 #include <atomic>
@@ -74,10 +76,16 @@ void configureOpenSslProviderPath()
 class RdpServer::Impl
 {
 public:
-    explicit Impl(RdpServer *owner)
+    explicit Impl(RdpServer *owner, RdpServerDependencies dependencies)
         : owner(owner)
+        , dependencies(std::move(dependencies))
     {
         configureOpenSslProviderPath();
+
+        if (!WTSRegisterWtsApiFunctionTable(FreeRDP_InitWtsApi())) {
+            setError(RdpServer::tr("FreeRDP virtual channel API initialization failed."));
+            return;
+        }
 
 #if defined(Q_OS_WIN)
         WSADATA socketData = {};
@@ -274,7 +282,10 @@ public:
                                                      .arg(message);
                     setError(sessionError);
                     emit owner->errorOccurred(sessionError);
-                });
+                },
+                dependencies.desktopCaptureFactory,
+                dependencies.inputControllerFactory,
+                dependencies.clipboardControllerFactory);
             newSession = session.get();
             sessions.emplace(id, std::move(session));
             newSession->takePeerOwnership();
@@ -420,6 +431,7 @@ public:
     }
 
     RdpServer *owner;
+    RdpServerDependencies dependencies;
     freerdp_listener *listener = nullptr;
     HANDLE stopEvent = nullptr;
     std::atomic_bool listening = false;
@@ -438,8 +450,13 @@ public:
 };
 
 RdpServer::RdpServer(QObject *parent)
+    : RdpServer(RdpServerDependencies{}, parent)
+{
+}
+
+RdpServer::RdpServer(RdpServerDependencies dependencies, QObject *parent)
     : QObject(parent)
-    , d(std::make_unique<Impl>(this))
+    , d(std::make_unique<Impl>(this, std::move(dependencies)))
 {
 }
 
