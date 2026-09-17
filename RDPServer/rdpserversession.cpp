@@ -1,7 +1,5 @@
 #include "rdpserversession_p.h"
 
-#include "rdptestframe_p.h"
-
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -26,7 +24,7 @@
 
 namespace {
 constexpr DWORD eventPollIntervalMs = 50;
-constexpr auto frameInterval = std::chrono::milliseconds(500);
+constexpr auto frameInterval = std::chrono::milliseconds(100);
 constexpr std::size_t initialStreamCapacity = 64 * 1024;
 constexpr auto testCertificateBaseName = "qtrdp-test";
 
@@ -122,11 +120,15 @@ RdpServerSession *sessionForPeer(freerdp_peer *peer)
 
 RdpServerSession::RdpServerSession(quint64 id,
                                    freerdp_peer *peer,
-                                   ClosedHandler closedHandler)
+                                   ClosedHandler closedHandler,
+                                   ErrorHandler errorHandler,
+                                   DesktopCaptureFactory captureFactory)
     : sessionId(id)
     , peer(peer)
     , address(peer ? QString::fromUtf8(peer->hostname) : QString())
     , closedHandler(std::move(closedHandler))
+    , errorHandler(std::move(errorHandler))
+    , captureFactory(std::move(captureFactory))
 {
 }
 
@@ -195,7 +197,8 @@ bool RdpServerSession::isRunning() const
 
 BOOL RdpServerSession::peerPostConnect(freerdp_peer *peer)
 {
-    return sessionForPeer(peer) ? TRUE : FALSE;
+    RdpServerSession *session = sessionForPeer(peer);
+    return session && session->handlePostConnect() ? TRUE : FALSE;
 }
 
 BOOL RdpServerSession::peerActivate(freerdp_peer *peer)
@@ -210,9 +213,44 @@ BOOL RdpServerSession::peerActivate(freerdp_peer *peer)
     return TRUE;
 }
 
+bool RdpServerSession::handlePostConnect()
+{
+    if (!desktopCapture) {
+        reportError(QStringLiteral("Desktop capture is not initialized."));
+        return false;
+    }
+
+    QString errorMessage;
+    const DesktopSize size = desktopCapture->desktopSize(&errorMessage);
+    if (!size.isValid()) {
+        reportError(errorMessage.isEmpty()
+                        ? QStringLiteral("Failed to query the desktop resolution.")
+                        : errorMessage);
+        return false;
+    }
+    return applyDesktopSize(size, true);
+}
+
 bool RdpServerSession::initializePeer()
 {
     if (!peer) {
+        return false;
+    }
+
+    desktopCapture = captureFactory ? captureFactory() : nullptr;
+    if (!desktopCapture) {
+        reportError(QStringLiteral("Desktop capture is not available on this platform."));
+        return false;
+    }
+
+    QString captureError;
+    const DesktopSize captureSize = desktopCapture->desktopSize(&captureError);
+    if (!captureSize.isValid()
+        || captureSize.width > (std::numeric_limits<UINT16>::max)()
+        || captureSize.height > (std::numeric_limits<UINT16>::max)()) {
+        reportError(captureError.isEmpty()
+                        ? QStringLiteral("The desktop resolution is invalid or exceeds the RDP limit.")
+                        : captureError);
         return false;
     }
 
@@ -257,6 +295,8 @@ bool RdpServerSession::initializePeer()
         || !freerdp_settings_set_bool(settings, FreeRDP_RemoteFxCodec, FALSE)
         || !freerdp_settings_set_bool(settings, FreeRDP_NSCodec, TRUE)
         || !freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32)
+        || !freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, captureSize.width)
+        || !freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, captureSize.height)
         || !freerdp_settings_set_uint32(settings,
                                         FreeRDP_MultifragMaxRequestSize,
                                         0x00FFFFFF)
@@ -264,6 +304,9 @@ bool RdpServerSession::initializePeer()
         || !freerdp_settings_set_bool(settings, FreeRDP_RefreshRect, FALSE)) {
         return false;
     }
+
+    desktopWidth = captureSize.width;
+    desktopHeight = captureSize.height;
 
     nscContext = nsc_context_new();
     frameStream = Stream_New(nullptr, initialStreamCapacity);
@@ -299,43 +342,83 @@ void RdpServerSession::cleanupPeer()
     if (peer) {
         peer->ContextExtra = nullptr;
     }
+    desktopCapture.reset();
 }
 
-bool RdpServerSession::sendTestFrame(bool fullFrame)
+bool RdpServerSession::applyDesktopSize(const DesktopSize &size, bool notifyClient)
+{
+    if (!size.isValid() || size.width > (std::numeric_limits<UINT16>::max)()
+        || size.height > (std::numeric_limits<UINT16>::max)() || !peer || !peer->context
+        || !peer->context->settings) {
+        reportError(QStringLiteral("The captured desktop resolution cannot be used by RDP."));
+        return false;
+    }
+
+    rdpSettings *settings = peer->context->settings;
+    const UINT32 configuredWidth = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
+    const UINT32 configuredHeight = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
+    desktopWidth = size.width;
+    desktopHeight = size.height;
+    if (configuredWidth == size.width && configuredHeight == size.height) {
+        return true;
+    }
+
+    if (!freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, size.width)
+        || !freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, size.height)) {
+        reportError(QStringLiteral("Failed to update the RDP desktop resolution."));
+        return false;
+    }
+
+    if (!notifyClient) {
+        return true;
+    }
+
+    rdpUpdate *update = peer->context->update;
+    if (!update || !update->DesktopResize || !update->DesktopResize(update->context)) {
+        reportError(QStringLiteral("Failed to notify the RDP client of a desktop resolution change."));
+        return false;
+    }
+    return true;
+}
+
+bool RdpServerSession::sendDesktopFrame(bool forceFullFrame)
 {
     if (!peer || !peer->context || !peer->context->settings || !peer->context->update
-        || !nscContext || !frameStream) {
+        || !nscContext || !frameStream || !desktopCapture) {
+        reportError(QStringLiteral("The desktop frame pipeline is not initialized."));
         return false;
     }
 
     rdpSettings *settings = peer->context->settings;
     rdpUpdate *update = peer->context->update;
-    const UINT32 width = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
-    const UINT32 height = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
     const UINT32 codecId = freerdp_settings_get_uint32(settings, FreeRDP_NSCodecId);
-    if (width == 0 || height == 0 || width > (std::numeric_limits<UINT16>::max)()
-        || height > (std::numeric_limits<UINT16>::max)() || codecId == 0
-        || codecId > (std::numeric_limits<UINT16>::max)() || !update->SurfaceBits) {
+    if (codecId == 0 || codecId > (std::numeric_limits<UINT16>::max)()
+        || !update->SurfaceBits) {
+        reportError(QStringLiteral("The RDP client did not negotiate a usable desktop codec."));
         return false;
     }
 
-    if (width != desktopWidth || height != desktopHeight) {
-        desktopWidth = width;
-        desktopHeight = height;
-        fullFrame = true;
+    DesktopCaptureResult captureResult = desktopCapture->capture(forceFullFrame);
+    if (captureResult.status == DesktopCaptureStatus::Error) {
+        reportError(captureResult.errorMessage.isEmpty()
+                        ? QStringLiteral("Desktop capture failed.")
+                        : captureResult.errorMessage);
+        return false;
+    }
+    if (captureResult.status == DesktopCaptureStatus::NoChanges) {
+        return true;
     }
 
-    const UINT16 frameWidth = static_cast<UINT16>(width);
-    const UINT16 frameHeight = static_cast<UINT16>(height);
-    RdpTestFrame frame = fullFrame
-                             ? RdpTestFrameGenerator::fullFrame(frameWidth,
-                                                                frameHeight,
-                                                                frameNumber)
-                             : RdpTestFrameGenerator::counterFrame(frameWidth,
-                                                                   frameHeight,
-                                                                   frameNumber);
+    const DesktopFrame &frame = captureResult.frame;
     if (!frame.isValid()) {
+        reportError(QStringLiteral("Desktop capture returned an invalid frame."));
         return false;
+    }
+
+    if (frame.desktopSize.width != desktopWidth || frame.desktopSize.height != desktopHeight) {
+        activated.store(false);
+        fullFrameRequested.store(true);
+        return applyDesktopSize(frame.desktopSize, true);
     }
 
     Stream_Clear(frameStream);
@@ -343,14 +426,16 @@ bool RdpServerSession::sendTestFrame(bool fullFrame)
     if (!nsc_compose_message(nscContext,
                              frameStream,
                              frame.pixels.data(),
-                             frame.width,
-                             frame.height,
+                             static_cast<UINT32>(frame.width),
+                             static_cast<UINT32>(frame.height),
                              frame.stride)) {
+        reportError(QStringLiteral("Failed to encode the captured desktop frame."));
         return false;
     }
 
     const size_t encodedSize = Stream_GetPosition(frameStream);
     if (encodedSize == 0 || encodedSize > (std::numeric_limits<UINT32>::max)()) {
+        reportError(QStringLiteral("The encoded desktop frame has an invalid size."));
         return false;
     }
 
@@ -358,22 +443,32 @@ bool RdpServerSession::sendTestFrame(bool fullFrame)
     command.cmdType = CMDTYPE_SET_SURFACE_BITS;
     command.destLeft = frame.x;
     command.destTop = frame.y;
-    command.destRight = static_cast<UINT32>(frame.x) + frame.width;
-    command.destBottom = static_cast<UINT32>(frame.y) + frame.height;
+    command.destRight = frame.x + frame.width;
+    command.destBottom = frame.y + frame.height;
     command.bmp.bpp = 32;
     command.bmp.codecID = static_cast<UINT16>(codecId);
-    command.bmp.width = frame.width;
-    command.bmp.height = frame.height;
+    command.bmp.width = static_cast<UINT16>(frame.width);
+    command.bmp.height = static_cast<UINT16>(frame.height);
     command.bmp.bitmapDataLength = static_cast<UINT32>(encodedSize);
     command.bmp.bitmapData = Stream_Buffer(frameStream);
     command.skipCompression = FALSE;
 
     if (!update->SurfaceBits(update->context, &command)) {
+        reportError(QStringLiteral("Failed to send the captured desktop frame to the RDP client."));
         return false;
     }
 
-    ++frameNumber;
     return true;
+}
+
+void RdpServerSession::reportError(const QString &message)
+{
+    if (errorReported.exchange(true)) {
+        return;
+    }
+    if (errorHandler) {
+        errorHandler(sessionId, message);
+    }
 }
 
 void RdpServerSession::run()
@@ -413,13 +508,15 @@ void RdpServerSession::run()
 
             const auto now = std::chrono::steady_clock::now();
             const bool fullFrame = fullFrameRequested.exchange(false);
-            if ((fullFrame || now >= nextFrame) && !sendTestFrame(fullFrame)) {
+            if ((fullFrame || now >= nextFrame) && !sendDesktopFrame(fullFrame)) {
                 break;
             }
             if (fullFrame || now >= nextFrame) {
                 nextFrame = now + frameInterval;
             }
         }
+    } else {
+        reportError(QStringLiteral("Failed to initialize the RDP client session."));
     }
 
     cleanupPeer();

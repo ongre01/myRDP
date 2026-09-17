@@ -1,5 +1,6 @@
+#include "desktopcapture.h"
+#include "desktopframebuffer_p.h"
 #include "rdpserver.h"
-#include "rdptestframe_p.h"
 
 #include <QSignalSpy>
 #include <QScopeGuard>
@@ -13,7 +14,6 @@
 #include <freerdp/settings.h>
 #include <winpr/synch.h>
 
-#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -175,7 +175,7 @@ TestConnectionResult connectAndReceiveFrames(quint16 port)
 
     auto *testContext = reinterpret_cast<TestClientContext *>(client->context);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (testContext->frameCount < 3 && std::chrono::steady_clock::now() < deadline) {
+    while (testContext->frameCount < 1 && std::chrono::steady_clock::now() < deadline) {
         std::array<HANDLE, 64> handles = {};
         const DWORD handleCount = freerdp_get_event_handles(client->context,
                                                             handles.data(),
@@ -208,8 +208,8 @@ TestConnectionResult connectAndReceiveFrames(quint16 port)
     result.frameCount = testContext->frameCount;
     result.firstFrameHash = testContext->firstFrameHash;
     result.lastFrameHash = testContext->lastFrameHash;
-    if (result.frameCount < 3 && result.error.isEmpty()) {
-        result.error = QStringLiteral("Timed out after receiving %1 test frames.")
+    if (result.frameCount < 1 && result.error.isEmpty()) {
+        result.error = QStringLiteral("Timed out after receiving %1 desktop frames.")
                            .arg(result.frameCount);
     }
     return result;
@@ -223,7 +223,8 @@ class RdpServerTest : public QObject
 private slots:
     void rejectsInvalidPort();
     void acceptsAndClosesSession();
-    void generatesChangingTestFrames();
+    void tracksDesktopFrameChanges();
+    void capturesWindowsDesktop();
     void connectsWithTlsAndReconnects();
 };
 
@@ -284,29 +285,91 @@ void RdpServerTest::acceptsAndClosesSession()
     QVERIFY(!server.isListening());
 }
 
-void RdpServerTest::generatesChangingTestFrames()
+void RdpServerTest::tracksDesktopFrameChanges()
 {
-    const RdpTestFrame full = RdpTestFrameGenerator::fullFrame(640, 480, 41);
-    QVERIFY(full.isValid());
-    QCOMPARE(full.x, std::uint16_t(0));
-    QCOMPARE(full.y, std::uint16_t(0));
-    QCOMPARE(full.width, std::uint16_t(640));
-    QCOMPARE(full.height, std::uint16_t(480));
-    QCOMPARE(full.pixels.size(), std::size_t(640 * 480 * 4));
+    DesktopFrameBuffer frameBuffer;
+    const DesktopSize initialSize = {32, 32};
+    const std::uint32_t initialStride = initialSize.width * desktopCaptureBytesPerPixel;
+    std::vector<std::uint8_t> pixels(initialStride * initialSize.height, 0x20);
 
-    const RdpTestFrame counter41 = RdpTestFrameGenerator::counterFrame(640, 480, 41);
-    const RdpTestFrame counter42 = RdpTestFrameGenerator::counterFrame(640, 480, 42);
-    QVERIFY(counter41.isValid());
-    QVERIFY(counter42.isValid());
-    QCOMPARE(counter41.x, counter42.x);
-    QCOMPARE(counter41.y, counter42.y);
-    QCOMPARE(counter41.width, counter42.width);
-    QCOMPARE(counter41.height, counter42.height);
-    QVERIFY(counter41.pixels != counter42.pixels);
+    const DesktopCaptureResult initial = frameBuffer.update(initialSize,
+                                                             initialStride,
+                                                             pixels,
+                                                             false);
+    QCOMPARE(initial.status, DesktopCaptureStatus::FrameReady);
+    QVERIFY(initial.frame.isValid());
+    QCOMPARE(initial.frame.x, std::uint32_t(0));
+    QCOMPARE(initial.frame.y, std::uint32_t(0));
+    QCOMPARE(initial.frame.width, initialSize.width);
+    QCOMPARE(initial.frame.height, initialSize.height);
+    QVERIFY(!initial.frame.desktopSizeChanged);
 
-    const auto firstPixel = full.pixels.cbegin();
-    const auto lastPixel = full.pixels.cend();
-    QVERIFY(std::adjacent_find(firstPixel, lastPixel, std::not_equal_to<>()) != lastPixel);
+    const DesktopCaptureResult unchanged = frameBuffer.update(initialSize,
+                                                               initialStride,
+                                                               pixels,
+                                                               false);
+    QCOMPARE(unchanged.status, DesktopCaptureStatus::NoChanges);
+
+    const std::size_t changedPixel = static_cast<std::size_t>(5) * initialStride
+                                     + static_cast<std::size_t>(20)
+                                           * desktopCaptureBytesPerPixel;
+    pixels[changedPixel] = 0xF0;
+    const DesktopCaptureResult changed = frameBuffer.update(initialSize,
+                                                             initialStride,
+                                                             pixels,
+                                                             false);
+    QCOMPARE(changed.status, DesktopCaptureStatus::FrameReady);
+    QVERIFY(changed.frame.isValid());
+    QCOMPARE(changed.frame.x, std::uint32_t(16));
+    QCOMPARE(changed.frame.y, std::uint32_t(0));
+    QCOMPARE(changed.frame.width, std::uint32_t(16));
+    QCOMPARE(changed.frame.height, std::uint32_t(16));
+
+    const DesktopSize resizedSize = {48, 16};
+    const std::uint32_t resizedStride = resizedSize.width * desktopCaptureBytesPerPixel;
+    pixels.assign(resizedStride * resizedSize.height, 0x40);
+    const DesktopCaptureResult resized = frameBuffer.update(resizedSize,
+                                                             resizedStride,
+                                                             pixels,
+                                                             false);
+    QCOMPARE(resized.status, DesktopCaptureStatus::FrameReady);
+    QVERIFY(resized.frame.isValid());
+    QVERIFY(resized.frame.desktopSizeChanged);
+    QCOMPARE(resized.frame.width, resizedSize.width);
+    QCOMPARE(resized.frame.height, resizedSize.height);
+
+    const DesktopCaptureResult invalid = frameBuffer.update(resizedSize,
+                                                             resizedStride,
+                                                             {},
+                                                             false);
+    QCOMPARE(invalid.status, DesktopCaptureStatus::Error);
+    QVERIFY(!invalid.errorMessage.isEmpty());
+}
+
+void RdpServerTest::capturesWindowsDesktop()
+{
+#if defined(Q_OS_WIN)
+    std::unique_ptr<DesktopCapture> capture = createDesktopCapture();
+    QVERIFY(capture);
+
+    QString errorMessage;
+    const DesktopSize size = capture->desktopSize(&errorMessage);
+    QVERIFY2(size.isValid(), qPrintable(errorMessage));
+
+    const DesktopCaptureResult first = capture->capture(true);
+    QCOMPARE(first.status, DesktopCaptureStatus::FrameReady);
+    QVERIFY2(first.frame.isValid(), qPrintable(first.errorMessage));
+    QVERIFY(first.frame.desktopSize == size);
+
+    const DesktopCaptureResult second = capture->capture(false);
+    QVERIFY2(second.status != DesktopCaptureStatus::Error,
+             qPrintable(second.errorMessage));
+    if (second.status == DesktopCaptureStatus::FrameReady) {
+        QVERIFY(second.frame.isValid());
+    }
+#else
+    QSKIP("Windows desktop capture is only available on Windows.");
+#endif
 }
 
 void RdpServerTest::connectsWithTlsAndReconnects()
@@ -329,9 +392,8 @@ void RdpServerTest::connectsWithTlsAndReconnects()
     const TestConnectionResult firstConnection = connectAndReceiveFrames(port);
     QVERIFY2(firstConnection.connected, qPrintable(firstConnection.error));
     QVERIFY(firstConnection.tlsNegotiated);
-    QVERIFY2(firstConnection.frameCount >= 3, qPrintable(firstConnection.error));
+    QVERIFY2(firstConnection.frameCount >= 1, qPrintable(firstConnection.error));
     QVERIFY(firstConnection.firstFrameHash != 0);
-    QVERIFY(firstConnection.firstFrameHash != firstConnection.lastFrameHash);
     QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2000);
     QTRY_COMPARE_WITH_TIMEOUT(disconnectedSpy.count(), 1, 2000);
     QTRY_COMPARE_WITH_TIMEOUT(server.sessionCount(), qsizetype(0), 2000);
@@ -339,9 +401,8 @@ void RdpServerTest::connectsWithTlsAndReconnects()
     const TestConnectionResult secondConnection = connectAndReceiveFrames(port);
     QVERIFY2(secondConnection.connected, qPrintable(secondConnection.error));
     QVERIFY(secondConnection.tlsNegotiated);
-    QVERIFY2(secondConnection.frameCount >= 3, qPrintable(secondConnection.error));
+    QVERIFY2(secondConnection.frameCount >= 1, qPrintable(secondConnection.error));
     QVERIFY(secondConnection.firstFrameHash != 0);
-    QVERIFY(secondConnection.firstFrameHash != secondConnection.lastFrameHash);
     QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 2, 2000);
     QTRY_COMPARE_WITH_TIMEOUT(disconnectedSpy.count(), 2, 2000);
     QTRY_COMPARE_WITH_TIMEOUT(server.sessionCount(), qsizetype(0), 2000);
