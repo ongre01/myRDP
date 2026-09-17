@@ -16,6 +16,7 @@ include(../qmake/freerdp.pri)
 win32: LIBS += -lws2_32
 
 SOURCES += \
+    clipboardtextcodec.cpp \
     clientsettings.cpp \
     inputeventtranslator.cpp \
     main.cpp \
@@ -24,6 +25,7 @@ SOURCES += \
     remotedesktopwidget.cpp
 
 HEADERS += \
+    clipboardtextcodec.h \
     clientsettings.h \
     inputeventtranslator.h \
     mainwindow.h \

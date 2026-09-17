@@ -2,8 +2,11 @@
 #include "clientsettings.h"
 #include "ui_mainwindow.h"
 
+#include <QApplication>
+#include <QClipboard>
 #include <QMessageBox>
 #include <QImage>
+#include <QScopedValueRollback>
 #include <QStatusBar>
 #include <QStringList>
 
@@ -29,6 +32,25 @@ MainWindow::MainWindow(QWidget *parent)
     rdpEventTimer.setTimerType(Qt::PreciseTimer);
     client.setDesktopUpdateHandler(
         [this](const DesktopUpdate &desktopUpdate) { displayDesktopUpdate(desktopUpdate); });
+    QClipboard *clipboard = QApplication::clipboard();
+    client.setClipboardTextHandler([this, clipboard](const QString &text) {
+        if (clipboard->text() == text) {
+            return;
+        }
+
+        QScopedValueRollback<bool> applyingClipboardText(applyingRemoteClipboard, true);
+        clipboard->setText(text);
+    });
+    connect(clipboard, &QClipboard::dataChanged, this, [this, clipboard]() {
+        if (applyingRemoteClipboard) {
+            return;
+        }
+
+        if (!client.sendClipboardText(clipboard->text())) {
+            handleInputError();
+        }
+    });
+    client.sendClipboardText(clipboard->text());
     ui->remoteDesktopView->setInputHandlers(
         [this](const RdpKeyboardInput &input) {
             if (client.sendKeyboardInput(input)) {
@@ -57,6 +79,7 @@ MainWindow::~MainWindow()
     rdpEventTimer.stop();
     ui->remoteDesktopView->setInputHandlers({}, {});
     client.setDesktopUpdateHandler({});
+    client.setClipboardTextHandler({});
     client.disconnect();
     delete ui;
 }

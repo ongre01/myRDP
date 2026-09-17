@@ -44,5 +44,6 @@ private:
     RdpClient client;
     QTimer rdpEventTimer;
     bool handlingInputError = false;
+    bool applyingRemoteClipboard = false;
 };
 #endif // MAINWINDOW_H

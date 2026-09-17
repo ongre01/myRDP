@@ -66,7 +66,9 @@ public:
     bool processEvents();
     bool sendKeyboardInput(const RdpKeyboardInput &input);
     bool sendPointerInput(const RdpPointerInput &input);
+    bool sendClipboardText(const QString &text);
     void setDesktopUpdateHandler(std::function<void(const DesktopUpdate &)> handler);
+    void setClipboardTextHandler(std::function<void(const QString &)> handler);
 
     bool isInitialized() const;
     bool isConnected() const;

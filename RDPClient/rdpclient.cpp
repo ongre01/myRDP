@@ -1,4 +1,5 @@
 #include "rdpclient.h"
+#include "clipboardtextcodec.h"
 
 #include <QByteArray>
 
@@ -6,11 +7,18 @@
 #include <limits>
 #include <utility>
 
+#include <freerdp/addin.h>
+#include <freerdp/channels/channels.h>
+#include <freerdp/client/channels.h>
+#include <freerdp/client/cliprdr.h>
+#include <freerdp/config.h>
 #include <freerdp/error.h>
+#include <freerdp/event.h>
 #include <freerdp/freerdp.h>
 #include <freerdp/gdi/gdi.h>
 #include <freerdp/input.h>
 #include <freerdp/settings.h>
+#include <winpr/error.h>
 #include <winpr/winsock.h>
 
 namespace {
@@ -113,6 +121,17 @@ public:
             return;
         }
 
+#if defined(WITH_CLIENT_CHANNELS)
+        if (freerdp_register_addin_provider(freerdp_channels_load_static_addin_entry, 0)
+            != CHANNEL_RC_OK) {
+            error = QStringLiteral("FreeRDP static channel provider initialization failed.");
+            freerdp_context_free(instance);
+            freerdp_free(instance);
+            instance = nullptr;
+            return;
+        }
+#endif
+
         clientContext(instance)->owner = this;
     }
 
@@ -185,7 +204,8 @@ public:
                                             FreeRDP_Domain,
                                             encodedDomain.constData())
             || !freerdp_settings_set_bool(settings, FreeRDP_Authentication, TRUE)
-            || !freerdp_settings_set_bool(settings, FreeRDP_NegotiateSecurityLayer, TRUE)) {
+            || !freerdp_settings_set_bool(settings, FreeRDP_NegotiateSecurityLayer, TRUE)
+            || !freerdp_settings_set_bool(settings, FreeRDP_RedirectClipboard, TRUE)) {
             error = QStringLiteral("FreeRDP connection settings could not be configured.");
             return false;
         }
@@ -199,6 +219,7 @@ public:
             } else if (error.isEmpty()) {
                 error = connectionError(instance->context);
             }
+            unsubscribeChannelEvents();
             certificateVerifier = {};
             return false;
         }
@@ -309,9 +330,31 @@ public:
         return false;
     }
 
+    bool sendClipboardText(const QString &text)
+    {
+        localClipboardText = text;
+        if (!clipboardContext || !clipboardReady) {
+            return true;
+        }
+
+        const UINT result = sendLocalClipboardFormatList();
+        if (result != CHANNEL_RC_OK) {
+            error = QStringLiteral("FreeRDP could not announce the local clipboard text "
+                                   "(channel error 0x%1).")
+                        .arg(result, 8, 16, QLatin1Char('0'));
+            return false;
+        }
+        return true;
+    }
+
     void setDesktopUpdateHandler(std::function<void(const DesktopUpdate &)> handler)
     {
         desktopUpdateHandler = std::move(handler);
+    }
+
+    void setClipboardTextHandler(std::function<void(const QString &)> handler)
+    {
+        clipboardTextHandler = std::move(handler);
     }
 
     bool isInitialized() const
@@ -320,6 +363,135 @@ public:
     }
 
 private:
+    UINT sendClientCapabilities()
+    {
+        if (!clipboardContext || !clipboardContext->ClientCapabilities) {
+            return ERROR_INVALID_PARAMETER;
+        }
+
+        CLIPRDR_GENERAL_CAPABILITY_SET generalCapability = {};
+        generalCapability.capabilitySetType = CB_CAPSTYPE_GENERAL;
+        generalCapability.capabilitySetLength = CB_CAPSTYPE_GENERAL_LEN;
+        generalCapability.version = CB_CAPS_VERSION_2;
+        generalCapability.generalFlags = CB_USE_LONG_FORMAT_NAMES;
+
+        CLIPRDR_CAPABILITIES capabilities = {};
+        capabilities.common.msgType = CB_CLIP_CAPS;
+        capabilities.cCapabilitiesSets = 1;
+        capabilities.capabilitySets =
+            reinterpret_cast<CLIPRDR_CAPABILITY_SET *>(&generalCapability);
+        return clipboardContext->ClientCapabilities(clipboardContext, &capabilities);
+    }
+
+    UINT sendLocalClipboardFormatList()
+    {
+        if (!clipboardContext || !clipboardContext->ClientFormatList) {
+            return ERROR_INVALID_PARAMETER;
+        }
+
+        CLIPRDR_FORMAT unicodeTextFormat = {};
+        unicodeTextFormat.formatId = CF_UNICODETEXT;
+
+        CLIPRDR_FORMAT_LIST formatList = {};
+        formatList.common.msgType = CB_FORMAT_LIST;
+        formatList.numFormats = 1;
+        formatList.formats = &unicodeTextFormat;
+        return clipboardContext->ClientFormatList(clipboardContext, &formatList);
+    }
+
+    UINT sendFormatListResponse(bool accepted)
+    {
+        if (!clipboardContext || !clipboardContext->ClientFormatListResponse) {
+            return ERROR_INVALID_PARAMETER;
+        }
+
+        CLIPRDR_FORMAT_LIST_RESPONSE response = {};
+        response.common.msgType = CB_FORMAT_LIST_RESPONSE;
+        response.common.msgFlags = accepted ? CB_RESPONSE_OK : CB_RESPONSE_FAIL;
+        return clipboardContext->ClientFormatListResponse(clipboardContext, &response);
+    }
+
+    UINT requestRemoteClipboardText()
+    {
+        if (!clipboardContext || !clipboardContext->ClientFormatDataRequest) {
+            return ERROR_INVALID_PARAMETER;
+        }
+
+        CLIPRDR_FORMAT_DATA_REQUEST request = {};
+        request.common.msgType = CB_FORMAT_DATA_REQUEST;
+        request.requestedFormatId = CF_UNICODETEXT;
+        requestedRemoteFormat = CF_UNICODETEXT;
+        const UINT result = clipboardContext->ClientFormatDataRequest(clipboardContext, &request);
+        if (result != CHANNEL_RC_OK) {
+            requestedRemoteFormat = 0;
+        }
+        return result;
+    }
+
+    UINT publishRemoteClipboardText(const QString &text)
+    {
+        if (!clipboardTextHandler) {
+            return CHANNEL_RC_OK;
+        }
+
+        try {
+            clipboardTextHandler(text);
+        } catch (...) {
+            error = QStringLiteral("The remote clipboard text handler failed.");
+            return ERROR_INTERNAL_ERROR;
+        }
+        return CHANNEL_RC_OK;
+    }
+
+    void attachClipboardChannel(CliprdrClientContext *context)
+    {
+        if (!context) {
+            return;
+        }
+
+        clipboardContext = context;
+        clipboardReady = false;
+        requestedRemoteFormat = 0;
+        context->custom = this;
+        context->MonitorReady = monitorReady;
+        context->ServerCapabilities = serverCapabilities;
+        context->ServerFormatList = serverFormatList;
+        context->ServerFormatListResponse = serverFormatListResponse;
+        context->ServerFormatDataRequest = serverFormatDataRequest;
+        context->ServerFormatDataResponse = serverFormatDataResponse;
+    }
+
+    void detachClipboardChannel(CliprdrClientContext *context)
+    {
+        if (!context || context != clipboardContext) {
+            return;
+        }
+
+        context->custom = nullptr;
+        clipboardContext = nullptr;
+        clipboardReady = false;
+        requestedRemoteFormat = 0;
+    }
+
+    void unsubscribeChannelEvents()
+    {
+        if (!channelEventsSubscribed || !instance || !instance->context
+            || !instance->context->pubSub) {
+            clipboardContext = nullptr;
+            clipboardReady = false;
+            requestedRemoteFormat = 0;
+            channelEventsSubscribed = false;
+            return;
+        }
+
+        PubSub_UnsubscribeChannelConnected(instance->context->pubSub, channelConnected);
+        PubSub_UnsubscribeChannelDisconnected(instance->context->pubSub, channelDisconnected);
+        channelEventsSubscribed = false;
+        clipboardContext = nullptr;
+        clipboardReady = false;
+        requestedRemoteFormat = 0;
+    }
+
     bool hasActiveInput() const
     {
         return connected && instance && instance->context && instance->context->input;
@@ -363,15 +535,63 @@ private:
         return true;
     }
 
+    bool loadClipboardChannel()
+    {
+#if defined(CHANNEL_CLIPRDR_CLIENT)
+        const DWORD flags = FREERDP_ADDIN_CHANNEL_STATIC | FREERDP_ADDIN_CHANNEL_ENTRYEX;
+        const PVIRTUALCHANNELENTRY rawEntry = freerdp_load_channel_addin_entry(
+            CLIPRDR_SVC_CHANNEL_NAME, nullptr, nullptr, flags);
+        const auto entry = reinterpret_cast<PVIRTUALCHANNELENTRYEX>(rawEntry);
+        if (!entry) {
+            error = QStringLiteral("The FreeRDP cliprdr client entry point is unavailable.");
+            return false;
+        }
+
+        if (freerdp_channels_client_load_ex(instance->context->channels,
+                                            instance->context->settings,
+                                            entry,
+                                            nullptr)
+            != 0) {
+            error = QStringLiteral("FreeRDP could not initialize the cliprdr client channel.");
+            return false;
+        }
+        return true;
+#else
+        error = QStringLiteral("This FreeRDP installation was built without the cliprdr client "
+                               "channel. Run scripts/build-freerdp.ps1 and rebuild RDPClient.");
+        return false;
+#endif
+    }
+
     static BOOL preConnect(freerdp *instance)
     {
-        if (!instance || !instance->context || !instance->context->settings) {
+        Impl *implementation = owner(instance);
+        if (!implementation || !instance->context || !instance->context->settings
+            || !instance->context->channels || !instance->context->pubSub) {
             return FALSE;
         }
 
         rdpSettings *settings = instance->context->settings;
-        return freerdp_settings_set_bool(settings, FreeRDP_SoftwareGdi, TRUE)
-                   && freerdp_settings_set_bool(settings, FreeRDP_DesktopResize, TRUE);
+        if (!freerdp_settings_set_bool(settings, FreeRDP_SoftwareGdi, TRUE)
+            || !freerdp_settings_set_bool(settings, FreeRDP_DesktopResize, TRUE)) {
+            return FALSE;
+        }
+
+        if (PubSub_SubscribeChannelConnected(instance->context->pubSub, channelConnected) < 0) {
+            return FALSE;
+        }
+        if (PubSub_SubscribeChannelDisconnected(instance->context->pubSub,
+                                                channelDisconnected) < 0) {
+            PubSub_UnsubscribeChannelConnected(instance->context->pubSub, channelConnected);
+            return FALSE;
+        }
+        implementation->channelEventsSubscribed = true;
+
+        if (!implementation->loadClipboardChannel()) {
+            implementation->unsubscribeChannelEvents();
+            return FALSE;
+        }
+        return TRUE;
     }
 
     static BOOL postConnect(freerdp *instance)
@@ -401,7 +621,177 @@ private:
 
     static void postDisconnect(freerdp *instance)
     {
+        Impl *implementation = owner(instance);
+        if (implementation) {
+            implementation->unsubscribeChannelEvents();
+        }
         gdi_free(instance);
+    }
+
+    static void channelConnected(void *context, const ChannelConnectedEventArgs *event)
+    {
+        Impl *implementation = owner(context);
+        if (!implementation || !event || !event->name) {
+            return;
+        }
+
+        if (std::strcmp(event->name, CLIPRDR_SVC_CHANNEL_NAME) == 0) {
+            implementation->attachClipboardChannel(
+                static_cast<CliprdrClientContext *>(event->pInterface));
+            return;
+        }
+        freerdp_client_OnChannelConnectedEventHandler(context, event);
+    }
+
+    static void channelDisconnected(void *context, const ChannelDisconnectedEventArgs *event)
+    {
+        Impl *implementation = owner(context);
+        if (!implementation || !event || !event->name) {
+            return;
+        }
+
+        if (std::strcmp(event->name, CLIPRDR_SVC_CHANNEL_NAME) == 0) {
+            implementation->detachClipboardChannel(
+                static_cast<CliprdrClientContext *>(event->pInterface));
+            return;
+        }
+        freerdp_client_OnChannelDisconnectedEventHandler(context, event);
+    }
+
+    static UINT monitorReady(CliprdrClientContext *context,
+                             const CLIPRDR_MONITOR_READY *monitorReady)
+    {
+        Impl *implementation = clipboardOwner(context);
+        if (!implementation || !monitorReady) {
+            return ERROR_INVALID_PARAMETER;
+        }
+
+        UINT result = implementation->sendClientCapabilities();
+        if (result != CHANNEL_RC_OK) {
+            return result;
+        }
+
+        implementation->clipboardReady = true;
+        result = implementation->sendLocalClipboardFormatList();
+        if (result != CHANNEL_RC_OK) {
+            implementation->clipboardReady = false;
+        }
+        return result;
+    }
+
+    static UINT serverCapabilities(CliprdrClientContext *context,
+                                   const CLIPRDR_CAPABILITIES *capabilities)
+    {
+        return clipboardOwner(context) && capabilities ? CHANNEL_RC_OK
+                                                       : ERROR_INVALID_PARAMETER;
+    }
+
+    static UINT serverFormatList(CliprdrClientContext *context,
+                                 const CLIPRDR_FORMAT_LIST *formatList)
+    {
+        Impl *implementation = clipboardOwner(context);
+        if (!implementation || !formatList
+            || (formatList->numFormats > 0 && !formatList->formats)) {
+            return ERROR_INVALID_PARAMETER;
+        }
+
+        bool hasUnicodeText = false;
+        for (UINT32 index = 0; index < formatList->numFormats; ++index) {
+            if (formatList->formats[index].formatId == CF_UNICODETEXT) {
+                hasUnicodeText = true;
+                break;
+            }
+        }
+
+        const UINT responseResult = implementation->sendFormatListResponse(true);
+        if (responseResult != CHANNEL_RC_OK) {
+            return responseResult;
+        }
+
+        if (formatList->numFormats == 0) {
+            implementation->requestedRemoteFormat = 0;
+            return implementation->publishRemoteClipboardText(QString());
+        }
+        if (!hasUnicodeText) {
+            implementation->requestedRemoteFormat = 0;
+            return CHANNEL_RC_OK;
+        }
+        return implementation->requestRemoteClipboardText();
+    }
+
+    static UINT serverFormatListResponse(
+        CliprdrClientContext *context,
+        const CLIPRDR_FORMAT_LIST_RESPONSE *formatListResponse)
+    {
+        return clipboardOwner(context) && formatListResponse ? CHANNEL_RC_OK
+                                                             : ERROR_INVALID_PARAMETER;
+    }
+
+    static UINT serverFormatDataRequest(
+        CliprdrClientContext *context,
+        const CLIPRDR_FORMAT_DATA_REQUEST *formatDataRequest)
+    {
+        Impl *implementation = clipboardOwner(context);
+        if (!implementation || !formatDataRequest || !context->ClientFormatDataResponse) {
+            return ERROR_INVALID_PARAMETER;
+        }
+
+        const bool supported = formatDataRequest->requestedFormatId == CF_UNICODETEXT;
+        const QByteArray encoded = supported
+                                       ? ClipboardTextCodec::encodeUtf16Le(
+                                             implementation->localClipboardText)
+                                       : QByteArray();
+        if (encoded.size() > (std::numeric_limits<UINT32>::max)()) {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+
+        CLIPRDR_FORMAT_DATA_RESPONSE response = {};
+        response.common.msgType = CB_FORMAT_DATA_RESPONSE;
+        response.common.msgFlags = supported ? CB_RESPONSE_OK : CB_RESPONSE_FAIL;
+        response.common.dataLen = supported ? static_cast<UINT32>(encoded.size()) : 0;
+        response.requestedFormatData = supported
+                                           ? reinterpret_cast<const BYTE *>(encoded.constData())
+                                           : nullptr;
+        return context->ClientFormatDataResponse(context, &response);
+    }
+
+    static UINT serverFormatDataResponse(
+        CliprdrClientContext *context,
+        const CLIPRDR_FORMAT_DATA_RESPONSE *formatDataResponse)
+    {
+        Impl *implementation = clipboardOwner(context);
+        if (!implementation || !formatDataResponse) {
+            return ERROR_INVALID_PARAMETER;
+        }
+
+        const UINT32 requestedFormat = implementation->requestedRemoteFormat;
+        implementation->requestedRemoteFormat = 0;
+        if (requestedFormat != CF_UNICODETEXT) {
+            return CHANNEL_RC_OK;
+        }
+        if ((formatDataResponse->common.msgFlags & CB_RESPONSE_FAIL) != 0) {
+            return CHANNEL_RC_OK;
+        }
+
+        const UINT32 dataLength = formatDataResponse->common.dataLen;
+        if (dataLength > 0 && !formatDataResponse->requestedFormatData) {
+            return ERROR_INVALID_DATA;
+        }
+
+        QByteArray encoded;
+        if (dataLength > 0) {
+            encoded = QByteArray(
+                reinterpret_cast<const char *>(formatDataResponse->requestedFormatData),
+                static_cast<qsizetype>(dataLength));
+        }
+        bool decodedSuccessfully = false;
+        const QString text = ClipboardTextCodec::decodeUtf16Le(encoded, &decodedSuccessfully);
+        if (!decodedSuccessfully) {
+            implementation->error = QStringLiteral("The remote clipboard returned invalid "
+                                                   "UTF-16 text data.");
+            return ERROR_INVALID_DATA;
+        }
+        return implementation->publishRemoteClipboardText(text);
     }
 
     static BOOL beginPaint(rdpContext *context)
@@ -530,6 +920,17 @@ private:
         return context ? static_cast<Impl *>(context->owner) : nullptr;
     }
 
+    static Impl *owner(void *context)
+    {
+        ClientContext *client = static_cast<ClientContext *>(context);
+        return client ? static_cast<Impl *>(client->owner) : nullptr;
+    }
+
+    static Impl *clipboardOwner(CliprdrClientContext *context)
+    {
+        return context ? static_cast<Impl *>(context->custom) : nullptr;
+    }
+
     static QString fromUtf8(const char *value)
     {
         return value ? QString::fromUtf8(value) : QString();
@@ -602,9 +1003,15 @@ public:
     bool winsockInitialized = false;
     bool connected = false;
     bool certificateRejected = false;
+    bool channelEventsSubscribed = false;
+    bool clipboardReady = false;
+    UINT32 requestedRemoteFormat = 0;
+    CliprdrClientContext *clipboardContext = nullptr;
     QString error;
+    QString localClipboardText;
     std::function<CertificateDecision(const CertificateInfo &)> certificateVerifier;
     std::function<void(const DesktopUpdate &)> desktopUpdateHandler;
+    std::function<void(const QString &)> clipboardTextHandler;
 };
 
 RdpClient::RdpClient()
@@ -639,10 +1046,20 @@ bool RdpClient::sendPointerInput(const RdpPointerInput &input)
     return d->sendPointerInput(input);
 }
 
+bool RdpClient::sendClipboardText(const QString &text)
+{
+    return d->sendClipboardText(text);
+}
+
 void RdpClient::setDesktopUpdateHandler(
     std::function<void(const DesktopUpdate &)> handler)
 {
     d->setDesktopUpdateHandler(std::move(handler));
+}
+
+void RdpClient::setClipboardTextHandler(std::function<void(const QString &)> handler)
+{
+    d->setClipboardTextHandler(std::move(handler));
 }
 
 bool RdpClient::isInitialized() const

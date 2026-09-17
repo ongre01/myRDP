@@ -65,7 +65,42 @@ $configureArguments = @(
     '-DWITH_SMARTCARD_EMULATE=OFF',
     '-DWITH_FFMPEG=OFF',
     '-DWITH_SWSCALE=OFF',
-    '-DWITH_CHANNELS=OFF',
+    '-DWITH_CHANNELS=ON',
+    '-DWITH_CLIENT_CHANNELS=ON',
+    '-DWITH_SERVER_CHANNELS=ON',
+    '-DCHANNEL_AINPUT=OFF',
+    '-DCHANNEL_AUDIN=OFF',
+    '-DCHANNEL_CLIPRDR=ON',
+    '-DCHANNEL_CLIPRDR_CLIENT=ON',
+    '-DCHANNEL_CLIPRDR_SERVER=ON',
+    '-DCHANNEL_DISP=OFF',
+    '-DCHANNEL_DRDYNVC=OFF',
+    '-DCHANNEL_DRIVE=OFF',
+    '-DCHANNEL_ECHO=OFF',
+    '-DCHANNEL_ENCOMSP=OFF',
+    '-DCHANNEL_GEOMETRY=OFF',
+    '-DCHANNEL_GFXREDIR=OFF',
+    '-DCHANNEL_LOCATION=OFF',
+    '-DCHANNEL_PARALLEL=OFF',
+    '-DCHANNEL_PRINTER=OFF',
+    '-DCHANNEL_RAIL=OFF',
+    '-DCHANNEL_RDP2TCP=OFF',
+    '-DCHANNEL_RDPDR=OFF',
+    '-DCHANNEL_RDPEAR=OFF',
+    '-DCHANNEL_RDPECAM=OFF',
+    '-DCHANNEL_RDPEI=OFF',
+    '-DCHANNEL_RDPEMSC=OFF',
+    '-DCHANNEL_RDPEWA=OFF',
+    '-DCHANNEL_RDPGFX=OFF',
+    '-DCHANNEL_RDPSND=OFF',
+    '-DCHANNEL_REMDESK=OFF',
+    '-DCHANNEL_SERIAL=OFF',
+    '-DCHANNEL_SMARTCARD=OFF',
+    '-DCHANNEL_SSHAGENT=OFF',
+    '-DCHANNEL_TELEMETRY=OFF',
+    '-DCHANNEL_TSMF=OFF',
+    '-DCHANNEL_URBDRC=OFF',
+    '-DCHANNEL_VIDEO=OFF',
     '-DWITH_CLIENT=OFF',
     '-DWITH_CLIENT_COMMON=ON',
     '-DWITH_CLIENT_SDL=OFF',
@@ -120,6 +155,13 @@ foreach ($relativePath in $requiredFiles) {
     if (-not (Test-Path -LiteralPath $installedFile)) {
         throw "FreeRDP install is incomplete. Missing: $installedFile"
     }
+}
+
+$freeRdpConfig = Join-Path $installDirectory 'include/freerdp3/freerdp/config.h'
+$cliprdrClientEnabled = Select-String -LiteralPath $freeRdpConfig `
+    -Pattern '^#define CHANNEL_CLIPRDR_CLIENT$' -Quiet
+if (-not $cliprdrClientEnabled) {
+    throw 'FreeRDP install does not include the cliprdr client channel.'
 }
 
 Write-Host "FreeRDP was installed successfully at $installDirectory"
