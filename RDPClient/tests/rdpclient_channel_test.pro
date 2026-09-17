@@ -5,6 +5,7 @@ TARGET = rdpclient_channel_test
 
 CONFIG += c++17 console testcase warn_on
 CONFIG -= app_bundle c++11
+DEFINES += RDPCLIENT_TESTING
 
 FREERDP_COMPONENTS = \
     freerdp-client \

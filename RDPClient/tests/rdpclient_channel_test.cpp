@@ -7,10 +7,10 @@ class RdpClientChannelTest : public QObject
     Q_OBJECT
 
 private slots:
-    void loadsClipboardChannelBeforeTransportConnection();
+    void loadsClipboardChannelThroughReloadCallbackBeforeTransportConnection();
 };
 
-void RdpClientChannelTest::loadsClipboardChannelBeforeTransportConnection()
+void RdpClientChannelTest::loadsClipboardChannelThroughReloadCallbackBeforeTransportConnection()
 {
     RdpClient client;
     QVERIFY2(client.isInitialized(), qPrintable(client.lastError()));
@@ -34,6 +34,7 @@ void RdpClientChannelTest::loadsClipboardChannelBeforeTransportConnection()
         QVERIFY2(!error.contains(QStringLiteral("clipboard channel"), Qt::CaseInsensitive),
                  qPrintable(error));
         QVERIFY(!client.isConnected());
+        QCOMPARE(client.clipboardChannelLoadCountForTesting(), attempt + 1);
     }
 }
 

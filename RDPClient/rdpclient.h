@@ -75,6 +75,10 @@ public:
     QString lastError() const;
     static QString libraryVersion();
 
+#if defined(RDPCLIENT_TESTING)
+    int clipboardChannelLoadCountForTesting() const;
+#endif
+
 private:
     class Impl;
     std::unique_ptr<Impl> d;

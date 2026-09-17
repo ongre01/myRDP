@@ -108,6 +108,7 @@ public:
         }
 
         instance->ContextSize = sizeof(ClientContext);
+        instance->LoadChannels = loadChannels;
         instance->PreConnect = preConnect;
         instance->PostConnect = postConnect;
         instance->PostDisconnect = postDisconnect;
@@ -205,7 +206,11 @@ public:
                                             encodedDomain.constData())
             || !freerdp_settings_set_bool(settings, FreeRDP_Authentication, TRUE)
             || !freerdp_settings_set_bool(settings, FreeRDP_NegotiateSecurityLayer, TRUE)
-            || !freerdp_settings_set_bool(settings, FreeRDP_RedirectClipboard, TRUE)) {
+            || !freerdp_settings_set_bool(settings, FreeRDP_RedirectClipboard, TRUE)
+            || !freerdp_settings_set_uint32(settings,
+                                            FreeRDP_ClipboardFeatureMask,
+                                            CLIPRDR_FLAG_LOCAL_TO_REMOTE
+                                                | CLIPRDR_FLAG_REMOTE_TO_LOCAL)) {
             error = QStringLiteral("FreeRDP connection settings could not be configured.");
             return false;
         }
@@ -219,6 +224,15 @@ public:
             } else if (error.isEmpty()) {
                 error = connectionError(instance->context);
             }
+            unsubscribeChannelEvents();
+            certificateVerifier = {};
+            return false;
+        }
+
+        if (!clipboardContext) {
+            error = QStringLiteral("The FreeRDP clipboard channel did not attach to the RDP "
+                                   "session.");
+            (void)freerdp_disconnect(instance);
             unsubscribeChannelEvents();
             certificateVerifier = {};
             return false;
@@ -563,6 +577,18 @@ private:
 #endif
     }
 
+    static BOOL loadChannels(freerdp *instance)
+    {
+        Impl *implementation = owner(instance);
+        if (!implementation || !implementation->loadClipboardChannel()) {
+            return FALSE;
+        }
+#if defined(RDPCLIENT_TESTING)
+        ++implementation->clipboardChannelLoadCount;
+#endif
+        return TRUE;
+    }
+
     static BOOL preConnect(freerdp *instance)
     {
         Impl *implementation = owner(instance);
@@ -586,11 +612,6 @@ private:
             return FALSE;
         }
         implementation->channelEventsSubscribed = true;
-
-        if (!implementation->loadClipboardChannel()) {
-            implementation->unsubscribeChannelEvents();
-            return FALSE;
-        }
         return TRUE;
     }
 
@@ -1012,6 +1033,9 @@ public:
     std::function<CertificateDecision(const CertificateInfo &)> certificateVerifier;
     std::function<void(const DesktopUpdate &)> desktopUpdateHandler;
     std::function<void(const QString &)> clipboardTextHandler;
+#if defined(RDPCLIENT_TESTING)
+    int clipboardChannelLoadCount = 0;
+#endif
 };
 
 RdpClient::RdpClient()
@@ -1081,3 +1105,10 @@ QString RdpClient::libraryVersion()
 {
     return QString::fromLatin1(freerdp_get_version_string());
 }
+
+#if defined(RDPCLIENT_TESTING)
+int RdpClient::clipboardChannelLoadCountForTesting() const
+{
+    return d->clipboardChannelLoadCount;
+}
+#endif
