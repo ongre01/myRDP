@@ -29,6 +29,21 @@ MainWindow::MainWindow(QWidget *parent)
     rdpEventTimer.setTimerType(Qt::PreciseTimer);
     client.setDesktopUpdateHandler(
         [this](const DesktopUpdate &desktopUpdate) { displayDesktopUpdate(desktopUpdate); });
+    ui->remoteDesktopView->setInputHandlers(
+        [this](const RdpKeyboardInput &input) {
+            if (client.sendKeyboardInput(input)) {
+                return true;
+            }
+            handleInputError();
+            return false;
+        },
+        [this](const RdpPointerInput &input) {
+            if (client.sendPointerInput(input)) {
+                return true;
+            }
+            handleInputError();
+            return false;
+        });
 
     if (client.isInitialized()) {
         setConnectionUiState(ConnectionUiState::Disconnected);
@@ -40,6 +55,7 @@ MainWindow::MainWindow(QWidget *parent)
 MainWindow::~MainWindow()
 {
     rdpEventTimer.stop();
+    ui->remoteDesktopView->setInputHandlers({}, {});
     client.setDesktopUpdateHandler({});
     client.disconnect();
     delete ui;
@@ -105,6 +121,8 @@ void MainWindow::setConnectionUiState(ConnectionUiState state, const QString &me
     const bool connected = state == ConnectionUiState::Connected;
     const bool busy = state == ConnectionUiState::Connecting;
 
+    ui->remoteDesktopView->setInputEnabled(connected);
+
     ui->serverAddressEdit->setEnabled(initialized && !connected && !busy);
     ui->portSpinBox->setEnabled(initialized && !connected && !busy);
     ui->usernameEdit->setEnabled(initialized && !connected && !busy);
@@ -130,6 +148,7 @@ void MainWindow::setConnectionUiState(ConnectionUiState state, const QString &me
         ui->connectionStatusValueLabel->setText(message.isEmpty() ? tr("Connected") : message);
         ui->connectionStatusValueLabel->setStyleSheet(QStringLiteral("color: #1a7f37;"));
         ui->remoteDesktopView->setPlaceholderMessage(tr("Waiting for the remote desktop..."));
+        ui->remoteDesktopView->setFocus(Qt::OtherFocusReason);
         break;
     case ConnectionUiState::Error:
         ui->connectionStatusValueLabel->setText(tr("Connection failed"));
@@ -138,6 +157,20 @@ void MainWindow::setConnectionUiState(ConnectionUiState state, const QString &me
         ui->remoteDesktopView->setPlaceholderMessage(tr("The remote desktop is unavailable."));
         break;
     }
+}
+
+void MainWindow::handleInputError()
+{
+    if (handlingInputError) {
+        return;
+    }
+
+    handlingInputError = true;
+    const QString inputError = client.lastError();
+    rdpEventTimer.stop();
+    client.disconnect();
+    showConnectionError(inputError);
+    handlingInputError = false;
 }
 
 void MainWindow::showConnectionError(const QString &message)

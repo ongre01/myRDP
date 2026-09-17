@@ -36,11 +36,13 @@ private:
 
     void setConnectionUiState(ConnectionUiState state, const QString &message = QString());
     void showConnectionError(const QString &message);
+    void handleInputError();
     CertificateDecision verifyServerCertificate(const CertificateInfo &certificate);
     void displayDesktopUpdate(const DesktopUpdate &desktopUpdate);
 
     Ui::MainWindow *ui;
     RdpClient client;
     QTimer rdpEventTimer;
+    bool handlingInputError = false;
 };
 #endif // MAINWINDOW_H

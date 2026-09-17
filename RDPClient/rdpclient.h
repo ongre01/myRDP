@@ -1,6 +1,8 @@
 #ifndef RDPCLIENT_H
 #define RDPCLIENT_H
 
+#include "rdpinput.h"
+
 #include <QByteArray>
 #include <QRect>
 #include <QSize>
@@ -62,6 +64,8 @@ public:
     bool connectToServer(const ConnectionInfo &info);
     void disconnect();
     bool processEvents();
+    bool sendKeyboardInput(const RdpKeyboardInput &input);
+    bool sendPointerInput(const RdpPointerInput &input);
     void setDesktopUpdateHandler(std::function<void(const DesktopUpdate &)> handler);
 
     bool isInitialized() const;

@@ -9,6 +9,7 @@
 #include <freerdp/error.h>
 #include <freerdp/freerdp.h>
 #include <freerdp/gdi/gdi.h>
+#include <freerdp/input.h>
 #include <freerdp/settings.h>
 #include <winpr/winsock.h>
 
@@ -237,6 +238,77 @@ public:
         return false;
     }
 
+    bool sendKeyboardInput(const RdpKeyboardInput &input)
+    {
+        if (!hasActiveInput()) {
+            error = QStringLiteral("Keyboard input cannot be sent without an active RDP connection.");
+            return false;
+        }
+
+        BOOL sent = FALSE;
+        switch (input.kind) {
+        case RdpKeyboardInput::Kind::ScanCode:
+            if (input.scanCode == RDP_SCANCODE_UNKNOWN) {
+                error = QStringLiteral("The keyboard event has an unknown RDP scan code.");
+                return false;
+            }
+            sent = freerdp_input_send_keyboard_event_ex(instance->context->input,
+                                                        input.pressed ? TRUE : FALSE,
+                                                        input.repeat ? TRUE : FALSE,
+                                                        input.scanCode);
+            break;
+        case RdpKeyboardInput::Kind::Pause:
+            if (!input.pressed) {
+                return true;
+            }
+            sent = freerdp_input_send_keyboard_pause_event(instance->context->input);
+            break;
+        }
+
+        if (!sent) {
+            error = QStringLiteral("FreeRDP could not send the keyboard input event.");
+            return false;
+        }
+        return true;
+    }
+
+    bool sendPointerInput(const RdpPointerInput &input)
+    {
+        if (!hasActiveInput()) {
+            error = QStringLiteral("Pointer input cannot be sent without an active RDP connection.");
+            return false;
+        }
+
+        if (input.position.x() < 0 || input.position.y() < 0
+            || input.position.x() > (std::numeric_limits<UINT16>::max)()
+            || input.position.y() > (std::numeric_limits<UINT16>::max)()) {
+            error = QStringLiteral("The pointer coordinates are outside the RDP coordinate range.");
+            return false;
+        }
+
+        const UINT16 x = static_cast<UINT16>(input.position.x());
+        const UINT16 y = static_cast<UINT16>(input.position.y());
+        switch (input.kind) {
+        case RdpPointerInput::Kind::Move:
+            return sendMouseEvent(PTR_FLAGS_MOVE, x, y);
+        case RdpPointerInput::Kind::LeftButton:
+            return sendMouseEvent(PTR_FLAGS_BUTTON1
+                                      | (input.pressed ? PTR_FLAGS_DOWN : 0),
+                                  x,
+                                  y);
+        case RdpPointerInput::Kind::RightButton:
+            return sendMouseEvent(PTR_FLAGS_BUTTON2
+                                      | (input.pressed ? PTR_FLAGS_DOWN : 0),
+                                  x,
+                                  y);
+        case RdpPointerInput::Kind::VerticalWheel:
+            return sendWheelEvent(input.wheelDelta, x, y);
+        }
+
+        error = QStringLiteral("The pointer input event type is unsupported.");
+        return false;
+    }
+
     void setDesktopUpdateHandler(std::function<void(const DesktopUpdate &)> handler)
     {
         desktopUpdateHandler = std::move(handler);
@@ -248,6 +320,49 @@ public:
     }
 
 private:
+    bool hasActiveInput() const
+    {
+        return connected && instance && instance->context && instance->context->input;
+    }
+
+    bool sendMouseEvent(UINT16 flags, UINT16 x, UINT16 y)
+    {
+        if (!freerdp_input_send_mouse_event(instance->context->input, flags, x, y)) {
+            error = QStringLiteral("FreeRDP could not send the pointer input event.");
+            return false;
+        }
+        return true;
+    }
+
+    bool sendWheelEvent(int delta, UINT16 x, UINT16 y)
+    {
+        if (delta == 0) {
+            return true;
+        }
+
+        qint64 remaining = delta;
+        const bool negative = remaining < 0;
+        if (negative) {
+            remaining = -remaining;
+        }
+
+        while (remaining > 0) {
+            const UINT16 amount = static_cast<UINT16>(qMin<qint64>(remaining, 0xFF));
+            UINT16 flags = PTR_FLAGS_WHEEL;
+            UINT16 encodedAmount = amount;
+            if (negative) {
+                flags |= PTR_FLAGS_WHEEL_NEGATIVE;
+                encodedAmount = static_cast<UINT16>(0x100 - amount);
+            }
+            flags |= encodedAmount & WheelRotationMask;
+            if (!sendMouseEvent(flags, x, y)) {
+                return false;
+            }
+            remaining -= amount;
+        }
+        return true;
+    }
+
     static BOOL preConnect(freerdp *instance)
     {
         if (!instance || !instance->context || !instance->context->settings) {
@@ -512,6 +627,16 @@ void RdpClient::disconnect()
 bool RdpClient::processEvents()
 {
     return d->processEvents();
+}
+
+bool RdpClient::sendKeyboardInput(const RdpKeyboardInput &input)
+{
+    return d->sendKeyboardInput(input);
+}
+
+bool RdpClient::sendPointerInput(const RdpPointerInput &input)
+{
+    return d->sendPointerInput(input);
 }
 
 void RdpClient::setDesktopUpdateHandler(

@@ -17,6 +17,7 @@ win32: LIBS += -lws2_32
 
 SOURCES += \
     clientsettings.cpp \
+    inputeventtranslator.cpp \
     main.cpp \
     mainwindow.cpp \
     rdpclient.cpp \
@@ -24,8 +25,10 @@ SOURCES += \
 
 HEADERS += \
     clientsettings.h \
+    inputeventtranslator.h \
     mainwindow.h \
     rdpclient.h \
+    rdpinput.h \
     remotedesktopwidget.h
 
 FORMS += \
