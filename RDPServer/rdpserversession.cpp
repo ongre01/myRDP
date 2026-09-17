@@ -248,7 +248,7 @@ bool RdpServerSession::initializePeer()
     }
 
     if (!freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, TRUE)
-        || !freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, FALSE)
+        || !freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE)
         || !freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, FALSE)
         || !freerdp_settings_set_bool(settings, FreeRDP_ExtSecurity, FALSE)
         || !freerdp_settings_set_uint32(settings,
