@@ -5,13 +5,16 @@
 #include <QtTypes>
 
 #include <atomic>
-#include <condition_variable>
 #include <functional>
-#include <mutex>
 #include <thread>
+
+#include <winpr/stream.h>
+#include <winpr/wtypes.h>
 
 struct rdp_freerdp_peer;
 using freerdp_peer = struct rdp_freerdp_peer;
+struct S_NSC_CONTEXT;
+using NSC_CONTEXT = struct S_NSC_CONTEXT;
 
 class RdpServerSession final
 {
@@ -34,7 +37,12 @@ public:
     bool isRunning() const;
 
 private:
-    bool peerDisconnected() const;
+    static BOOL peerPostConnect(freerdp_peer *peer);
+    static BOOL peerActivate(freerdp_peer *peer);
+
+    bool initializePeer();
+    void cleanupPeer();
+    bool sendTestFrame(bool fullFrame);
     void run();
 
     quint64 sessionId;
@@ -43,10 +51,16 @@ private:
     ClosedHandler closedHandler;
     bool ownsPeer = false;
     bool started = false;
+    bool peerInitialized = false;
     std::atomic_bool stopRequested = false;
     std::atomic_bool running = false;
-    std::mutex waitMutex;
-    std::condition_variable waitCondition;
+    std::atomic_bool activated = false;
+    std::atomic_bool fullFrameRequested = false;
+    NSC_CONTEXT *nscContext = nullptr;
+    wStream *frameStream = nullptr;
+    quint64 frameNumber = 0;
+    quint32 desktopWidth = 0;
+    quint32 desktopHeight = 0;
     std::thread worker;
 };
 

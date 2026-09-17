@@ -9,6 +9,7 @@ CONFIG -= app_bundle c++11
 FREERDP_COMPONENTS = \
     freerdp-server \
     freerdp \
+    winpr-tools \
     winpr
 
 isEmpty(FREERDP_INSTALL_PREFIX) {
@@ -24,8 +25,10 @@ INCLUDEPATH += ..
 SOURCES += \
     tst_rdpserver.cpp \
     ../rdpserver.cpp \
-    ../rdpserversession.cpp
+    ../rdpserversession.cpp \
+    ../rdptestframe.cpp
 
 HEADERS += \
     ../rdpserver.h \
-    ../rdpserversession_p.h
+    ../rdpserversession_p.h \
+    ../rdptestframe_p.h

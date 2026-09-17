@@ -2,6 +2,12 @@
 
 #include "rdpserversession_p.h"
 
+#include <QCoreApplication>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QLibrary>
+
 #include <freerdp/listener.h>
 #include <winpr/synch.h>
 #include <winpr/winsock.h>
@@ -15,12 +21,64 @@
 #include <utility>
 #include <vector>
 
+namespace {
+void configureOpenSslProviderPath()
+{
+#if defined(Q_OS_WIN)
+    static std::once_flag configured;
+    std::call_once(configured, []() {
+        const QString applicationDirectory = QCoreApplication::applicationDirPath();
+        const QString legacyProvider =
+            QDir(applicationDirectory).filePath(QStringLiteral("legacy.dll"));
+        QString providerDirectory;
+
+        if (!qEnvironmentVariableIsEmpty("OPENSSL_MODULES")) {
+            providerDirectory = QFile::decodeName(qgetenv("OPENSSL_MODULES"));
+        } else if (QFileInfo::exists(legacyProvider)) {
+            providerDirectory = applicationDirectory;
+            qputenv("OPENSSL_MODULES", QFile::encodeName(providerDirectory));
+        }
+
+        if (providerDirectory.isEmpty()) {
+            return;
+        }
+
+        QLibrary cryptoLibrary(
+            QDir(applicationDirectory).filePath(QStringLiteral("libcrypto-3-x64.dll")));
+        if (!cryptoLibrary.load()) {
+            return;
+        }
+
+        using SetProviderSearchPath = int (*)(void *, const char *);
+        const auto setProviderSearchPath = reinterpret_cast<SetProviderSearchPath>(
+            cryptoLibrary.resolve("OSSL_PROVIDER_set_default_search_path"));
+        if (setProviderSearchPath) {
+            const QByteArray encodedProviderDirectory = QFile::encodeName(providerDirectory);
+            setProviderSearchPath(nullptr, encodedProviderDirectory.constData());
+        }
+
+        using LoadProvider = void *(*)(void *, const char *);
+        const auto loadProvider = reinterpret_cast<LoadProvider>(
+            cryptoLibrary.resolve("OSSL_PROVIDER_load"));
+        if (loadProvider) {
+            static void *defaultProvider = loadProvider(nullptr, "default");
+            static void *legacyProvider = loadProvider(nullptr, "legacy");
+            Q_UNUSED(defaultProvider);
+            Q_UNUSED(legacyProvider);
+        }
+    });
+#endif
+}
+} // namespace
+
 class RdpServer::Impl
 {
 public:
     explicit Impl(RdpServer *owner)
         : owner(owner)
     {
+        configureOpenSslProviderPath();
+
 #if defined(Q_OS_WIN)
         WSADATA socketData = {};
         if (WSAStartup(MAKEWORD(2, 2), &socketData) != 0) {
