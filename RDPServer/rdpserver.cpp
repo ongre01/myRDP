@@ -1,6 +1,7 @@
 #include "rdpserver.h"
 
 #include "rdpserversession_p.h"
+#include "serverlogger.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -14,6 +15,7 @@
 #include <winpr/winsock.h>
 #include <winpr/wtsapi.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <exception>
@@ -134,11 +136,23 @@ public:
         if (!isInitialized()) {
             return false;
         }
-        if (configuration.port == 0) {
-            return fail(RdpServer::tr("The listen port must be between 1 and 65535."));
-        }
         if (listening.load()) {
             return fail(RdpServer::tr("The RDP server is already listening."));
+        }
+
+        RdpServerConfiguration effectiveConfiguration = configuration;
+        if (effectiveConfiguration.logFilePath.trimmed().isEmpty()) {
+            effectiveConfiguration.logFilePath = RdpServerSettings::defaultLogFilePath();
+        }
+        QString configurationError;
+        if (!effectiveConfiguration.validate(&configurationError)) {
+            return fail(RdpServer::tr("Invalid server configuration: %1")
+                            .arg(configurationError));
+        }
+        if (!logger.configure(effectiveConfiguration.logLevel,
+                              effectiveConfiguration.logFilePath,
+                              &configurationError)) {
+            return fail(configurationError);
         }
 
         if (listenerThread.joinable()) {
@@ -146,23 +160,35 @@ public:
         }
         collectFinishedSessions();
 
-        const QString normalizedAddress = configuration.bindAddress.trimmed();
+        const QString normalizedAddress = effectiveConfiguration.bindAddress.trimmed();
         const QByteArray nativeAddress = normalizedAddress.toUtf8();
         const char *bindAddress = normalizedAddress.isEmpty() ? nullptr : nativeAddress.constData();
 
         clearError();
+        currentConfiguration = effectiveConfiguration;
         stopping.store(false);
         ResetEvent(stopEvent);
 
-        if (!listener->Open(listener, bindAddress, configuration.port)) {
-            return fail(RdpServer::tr("Failed to listen on %1:%2 (socket error %3).")
-                            .arg(displayAddress(normalizedAddress))
-                            .arg(configuration.port)
-                            .arg(WSAGetLastError()));
+        writeLog(RdpServerLogLevel::Info,
+                 QStringLiteral("Server start"),
+                 RdpServer::tr("Starting server on %1:%2.")
+                     .arg(displayAddress(normalizedAddress))
+                     .arg(effectiveConfiguration.port));
+
+        if (!listener->Open(listener,
+                            bindAddress,
+                            static_cast<UINT16>(effectiveConfiguration.port))) {
+            const QString message = RdpServer::tr(
+                                        "Failed to listen on %1:%2 (socket error %3).")
+                                        .arg(displayAddress(normalizedAddress))
+                                        .arg(effectiveConfiguration.port)
+                                        .arg(WSAGetLastError());
+            writeLog(RdpServerLogLevel::Error, QStringLiteral("Network error"), message);
+            return fail(message);
         }
 
         currentAddress = normalizedAddress;
-        currentPort = configuration.port;
+        currentPort = static_cast<quint16>(effectiveConfiguration.port);
         listening.store(true);
 
         try {
@@ -170,21 +196,35 @@ public:
         } catch (const std::exception &exception) {
             listener->Close(listener);
             listening.store(false);
-            return fail(RdpServer::tr("Failed to start the listener thread: %1")
-                            .arg(QString::fromLocal8Bit(exception.what())));
+            const QString message = RdpServer::tr("Failed to start the listener thread: %1")
+                                        .arg(QString::fromLocal8Bit(exception.what()));
+            writeLog(RdpServerLogLevel::Error, QStringLiteral("Server start"), message);
+            return fail(message);
         } catch (...) {
             listener->Close(listener);
             listening.store(false);
-            return fail(RdpServer::tr("Failed to start the listener thread."));
+            const QString message = RdpServer::tr("Failed to start the listener thread.");
+            writeLog(RdpServerLogLevel::Error, QStringLiteral("Server start"), message);
+            return fail(message);
         }
 
         emit owner->listeningStarted(displayAddress(currentAddress), currentPort);
+        writeLog(RdpServerLogLevel::Info,
+                 QStringLiteral("Server start"),
+                 RdpServer::tr("Server listening on %1:%2.")
+                     .arg(displayAddress(currentAddress))
+                     .arg(currentPort));
         return true;
     }
 
     void stop()
     {
         const bool wasListening = listening.load();
+        if (wasListening) {
+            writeLog(RdpServerLogLevel::Info,
+                     QStringLiteral("Server stop"),
+                     RdpServer::tr("Server stop requested."));
+        }
         stopping.store(true);
         if (stopEvent) {
             SetEvent(stopEvent);
@@ -217,6 +257,9 @@ public:
         listening.store(false);
         stopping.store(false);
         if (wasListening) {
+            writeLog(RdpServerLogLevel::Info,
+                     QStringLiteral("Server stop"),
+                     RdpServer::tr("Server stopped."));
             emit owner->listeningStopped();
         }
     }
@@ -260,6 +303,7 @@ public:
 
     bool acceptPeer(freerdp_peer *peer)
     {
+        const QString peerAddress = peer ? QString::fromUtf8(peer->hostname) : QString();
         const quint64 id = nextSessionId.fetch_add(1);
         RdpServerSession *newSession = nullptr;
         std::unique_ptr<RdpServerSession> failedSession;
@@ -270,18 +314,51 @@ public:
                 return false;
             }
 
+            const auto activeSessionCount = std::count_if(
+                sessions.cbegin(),
+                sessions.cend(),
+                [](const auto &entry) { return entry.second->isRunning(); });
+            if (activeSessionCount
+                >= static_cast<decltype(activeSessionCount)>(
+                    currentConfiguration.maximumClientCount)) {
+                writeLog(RdpServerLogLevel::Warning,
+                         QStringLiteral("Network error"),
+                         RdpServer::tr("Client connection from %1 rejected: the maximum client "
+                                       "count (%2) was reached.")
+                             .arg(displayPeerAddress(peerAddress))
+                             .arg(currentConfiguration.maximumClientCount));
+                return false;
+            }
+
             auto session = std::make_unique<RdpServerSession>(
                 id,
                 peer,
+                currentConfiguration,
                 [this](quint64 closedId, const QString &peerAddress) {
+                    writeLog(RdpServerLogLevel::Info,
+                             QStringLiteral("Client disconnect"),
+                             RdpServer::tr("Session %1 disconnected (%2).")
+                                 .arg(closedId)
+                                 .arg(displayPeerAddress(peerAddress)));
                     emit owner->clientDisconnected(closedId, peerAddress);
                 },
-                [this](quint64 failedId, const QString &message) {
+                [this](quint64 failedId,
+                       const QString &category,
+                       const QString &message) {
                     const QString sessionError = RdpServer::tr("Session %1: %2")
                                                      .arg(failedId)
                                                      .arg(message);
                     setError(sessionError);
+                    writeLog(RdpServerLogLevel::Error, category, sessionError);
                     emit owner->errorOccurred(sessionError);
+                },
+                [this](quint64 sessionId,
+                       RdpServerLogLevel level,
+                       const QString &category,
+                       const QString &message) {
+                    writeLog(level,
+                             category,
+                             RdpServer::tr("Session %1: %2").arg(sessionId).arg(message));
                 },
                 dependencies.desktopCaptureFactory,
                 dependencies.inputControllerFactory,
@@ -298,21 +375,35 @@ public:
         } catch (const std::exception &exception) {
             setError(RdpServer::tr("Failed to create a client session: %1")
                          .arg(QString::fromLocal8Bit(exception.what())));
+            writeLog(RdpServerLogLevel::Error,
+                     QStringLiteral("Session state"),
+                     lastError());
             emit owner->errorOccurred(lastError());
             return false;
         } catch (...) {
             setError(RdpServer::tr("Failed to create a client session."));
+            writeLog(RdpServerLogLevel::Error,
+                     QStringLiteral("Session state"),
+                     lastError());
             emit owner->errorOccurred(lastError());
             return false;
         }
 
         if (failedSession) {
             setError(RdpServer::tr("Failed to start client session %1.").arg(id));
+            writeLog(RdpServerLogLevel::Error,
+                     QStringLiteral("Session state"),
+                     lastError());
             emit owner->errorOccurred(lastError());
             return true;
         }
 
         emit owner->clientConnected(id, newSession->peerAddress());
+        writeLog(RdpServerLogLevel::Info,
+                 QStringLiteral("Client connect"),
+                 RdpServer::tr("Session %1 accepted from %2.")
+                     .arg(id)
+                     .arg(displayPeerAddress(newSession->peerAddress())));
         return true;
     }
 
@@ -371,6 +462,9 @@ public:
 
         if (!loopError.isEmpty() && !stopping.load()) {
             setError(loopError);
+            writeLog(RdpServerLogLevel::Error,
+                     QStringLiteral("Network error"),
+                     loopError);
             emit owner->errorOccurred(loopError);
         }
         if (!stopping.load()) {
@@ -412,6 +506,28 @@ public:
         return address.isEmpty() ? RdpServer::tr("all interfaces") : address;
     }
 
+    static QString displayPeerAddress(const QString &address)
+    {
+        return address.isEmpty() ? RdpServer::tr("unknown peer") : address;
+    }
+
+    void writeLog(RdpServerLogLevel level,
+                  const QString &category,
+                  const QString &message)
+    {
+        if (!logger.isEnabled(level)) {
+            return;
+        }
+
+        QString logError;
+        if (!logger.write(level, category, message, &logError)) {
+            setError(logError);
+            emit owner->errorOccurred(logError);
+            return;
+        }
+        emit owner->logMessage(level, category, message);
+    }
+
     bool fail(const QString &message)
     {
         setError(message);
@@ -432,6 +548,8 @@ public:
 
     RdpServer *owner;
     RdpServerDependencies dependencies;
+    RdpServerLogger logger;
+    RdpServerConfiguration currentConfiguration;
     freerdp_listener *listener = nullptr;
     HANDLE stopEvent = nullptr;
     std::atomic_bool listening = false;
@@ -458,6 +576,7 @@ RdpServer::RdpServer(RdpServerDependencies dependencies, QObject *parent)
     : QObject(parent)
     , d(std::make_unique<Impl>(this, std::move(dependencies)))
 {
+    qRegisterMetaType<RdpServerLogLevel>();
 }
 
 RdpServer::~RdpServer()

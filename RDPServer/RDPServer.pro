@@ -1,4 +1,4 @@
-QT += core gui widgets
+QT += core gui network widgets
 
 TEMPLATE = app
 TARGET = RDPServer
@@ -17,6 +17,7 @@ include(../qmake/freerdp.pri)
 win32: LIBS += -lws2_32 -lgdi32 -luser32
 
 SOURCES += \
+    autostartmanager.cpp \
     clipboardcontroller.cpp \
     desktopcapture.cpp \
     desktopframebuffer.cpp \
@@ -26,7 +27,9 @@ SOURCES += \
     rdpclipboardhandler.cpp \
     rdpinputhandler.cpp \
     rdpserver.cpp \
-    rdpserversession.cpp
+    rdpserversession.cpp \
+    serverconfiguration.cpp \
+    serverlogger.cpp
 
 win32: SOURCES += \
     windowsclipboardcontroller.cpp \
@@ -34,6 +37,7 @@ win32: SOURCES += \
     windowsinputcontroller.cpp
 
 HEADERS += \
+    autostartmanager.h \
     clipboardcontroller.h \
     desktopcapture.h \
     desktopframebuffer_p.h \
@@ -42,7 +46,9 @@ HEADERS += \
     rdpclipboardhandler_p.h \
     rdpinputhandler_p.h \
     rdpserver.h \
-    rdpserversession_p.h
+    rdpserversession_p.h \
+    serverconfiguration.h \
+    serverlogger.h
 
 win32: HEADERS += \
     windowsclipboardcontroller_p.h \
@@ -51,6 +57,15 @@ win32: HEADERS += \
 
 FORMS += \
     mainwindow.ui
+
+DISTFILES += RDPServer.ini
+
+CONFIG += file_copies
+server_configuration.files = $$PWD/RDPServer.ini
+server_configuration.path = $$OUT_PWD
+win32:CONFIG(debug, debug|release): server_configuration.path = $$OUT_PWD/debug
+win32:CONFIG(release, debug|release): server_configuration.path = $$OUT_PWD/release
+COPIES += server_configuration
 
 qnx: target.path = /tmp/$${TARGET}/bin
 else: unix:!android: target.path = /opt/$${TARGET}/bin

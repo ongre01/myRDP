@@ -93,6 +93,32 @@
      </widget>
     </item>
     <item>
+     <widget class="QGroupBox" name="backgroundGroupBox">
+      <property name="title">
+       <string>Background operation</string>
+      </property>
+      <layout class="QVBoxLayout" name="backgroundLayout">
+       <item>
+        <widget class="QCheckBox" name="autoStartCheckBox">
+         <property name="text">
+          <string>Start QtRdp Server when I sign in to Windows</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="backgroundHintLabel">
+         <property name="text">
+          <string>Closing this window keeps the server running. Use the notification area icon to open settings or exit.</string>
+         </property>
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    </item>
+    <item>
      <layout class="QHBoxLayout" name="statusLayout">
       <item>
        <widget class="QLabel" name="serverStateTitleLabel">

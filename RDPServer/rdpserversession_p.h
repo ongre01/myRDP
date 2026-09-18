@@ -4,6 +4,7 @@
 #include "clipboardcontroller.h"
 #include "desktopcapture.h"
 #include "inputcontroller.h"
+#include "serverconfiguration.h"
 
 #include <QByteArray>
 #include <QString>
@@ -15,6 +16,7 @@
 #include <thread>
 
 #include <freerdp/server/cliprdr.h>
+#include <winpr/sspi.h>
 #include <winpr/stream.h>
 #include <winpr/wtypes.h>
 
@@ -32,12 +34,19 @@ class RdpServerSession final
 {
 public:
     using ClosedHandler = std::function<void(quint64, const QString &)>;
-    using ErrorHandler = std::function<void(quint64, const QString &)>;
+    using ErrorHandler =
+        std::function<void(quint64, const QString &, const QString &)>;
+    using EventHandler = std::function<void(quint64,
+                                            RdpServerLogLevel,
+                                            const QString &,
+                                            const QString &)>;
 
     RdpServerSession(quint64 id,
                      freerdp_peer *peer,
+                     RdpServerConfiguration configuration,
                      ClosedHandler closedHandler,
                      ErrorHandler errorHandler,
+                     EventHandler eventHandler,
                      DesktopCaptureFactory captureFactory = createDesktopCapture,
                      InputControllerFactory inputFactory = createInputController,
                      ClipboardControllerFactory clipboardFactory = createClipboardController);
@@ -58,6 +67,9 @@ public:
 private:
     static BOOL peerPostConnect(freerdp_peer *peer);
     static BOOL peerActivate(freerdp_peer *peer);
+    static BOOL peerLogon(freerdp_peer *peer,
+                          const SEC_WINNT_AUTH_IDENTITY *identity,
+                          BOOL automatic);
     static BOOL inputKeyboardEvent(rdpInput *input, UINT16 flags, UINT8 code);
     static BOOL inputUnicodeKeyboardEvent(rdpInput *input, UINT16 flags, UINT16 code);
     static BOOL inputMouseEvent(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y);
@@ -83,6 +95,7 @@ private:
         const CLIPRDR_FORMAT_DATA_RESPONSE *formatDataResponse);
 
     bool handlePostConnect();
+    bool handleLogon(const SEC_WINNT_AUTH_IDENTITY *identity, bool automatic);
     bool initializePeer();
     void cleanupPeer();
     bool initializeClipboardChannel();
@@ -94,14 +107,20 @@ private:
     UINT sendClipboardDataResponse(bool accepted, const QByteArray &encoded = {});
     bool applyDesktopSize(const DesktopSize &size, bool notifyClient);
     bool sendDesktopFrame(bool forceFullFrame);
-    void reportError(const QString &message);
+    void reportEvent(RdpServerLogLevel level,
+                     const QString &category,
+                     const QString &message);
+    void reportError(const QString &message,
+                     const QString &category = QStringLiteral("RDP protocol error"));
     void run();
 
     quint64 sessionId;
     freerdp_peer *peer;
     QString address;
+    RdpServerConfiguration configuration;
     ClosedHandler closedHandler;
     ErrorHandler errorHandler;
+    EventHandler eventHandler;
     DesktopCaptureFactory captureFactory;
     InputControllerFactory inputFactory;
     ClipboardControllerFactory clipboardFactory;

@@ -29,6 +29,7 @@ SOURCES += \
     tst_rdpserver.cpp \
     ../../RDPClient/clipboardtextcodec.cpp \
     ../../RDPClient/rdpclient.cpp \
+    ../autostartmanager.cpp \
     ../clipboardcontroller.cpp \
     ../desktopcapture.cpp \
     ../desktopframebuffer.cpp \
@@ -36,7 +37,9 @@ SOURCES += \
     ../rdpclipboardhandler.cpp \
     ../rdpinputhandler.cpp \
     ../rdpserver.cpp \
-    ../rdpserversession.cpp
+    ../rdpserversession.cpp \
+    ../serverconfiguration.cpp \
+    ../serverlogger.cpp
 
 win32: SOURCES += \
     ../windowsclipboardcontroller.cpp \
@@ -47,6 +50,7 @@ HEADERS += \
     ../../RDPClient/clipboardtextcodec.h \
     ../../RDPClient/rdpclient.h \
     ../../RDPClient/rdpinput.h \
+    ../autostartmanager.h \
     ../clipboardcontroller.h \
     ../desktopcapture.h \
     ../desktopframebuffer_p.h \
@@ -54,7 +58,9 @@ HEADERS += \
     ../rdpclipboardhandler_p.h \
     ../rdpinputhandler_p.h \
     ../rdpserver.h \
-    ../rdpserversession_p.h
+    ../rdpserversession_p.h \
+    ../serverconfiguration.h \
+    ../serverlogger.h
 
 win32: HEADERS += \
     ../windowsclipboardcontroller_p.h \

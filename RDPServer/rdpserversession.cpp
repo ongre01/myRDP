@@ -137,16 +137,20 @@ RdpServerSession *sessionForClipboard(CliprdrServerContext *context)
 
 RdpServerSession::RdpServerSession(quint64 id,
                                    freerdp_peer *peer,
+                                   RdpServerConfiguration configuration,
                                    ClosedHandler closedHandler,
                                    ErrorHandler errorHandler,
+                                   EventHandler eventHandler,
                                    DesktopCaptureFactory captureFactory,
                                    InputControllerFactory inputFactory,
                                    ClipboardControllerFactory clipboardFactory)
     : sessionId(id)
     , peer(peer)
     , address(peer ? QString::fromUtf8(peer->hostname) : QString())
+    , configuration(std::move(configuration))
     , closedHandler(std::move(closedHandler))
     , errorHandler(std::move(errorHandler))
+    , eventHandler(std::move(eventHandler))
     , captureFactory(std::move(captureFactory))
     , inputFactory(std::move(inputFactory))
     , clipboardFactory(std::move(clipboardFactory))
@@ -219,7 +223,13 @@ bool RdpServerSession::isRunning() const
 BOOL RdpServerSession::peerPostConnect(freerdp_peer *peer)
 {
     RdpServerSession *session = sessionForPeer(peer);
-    return session && session->handlePostConnect() ? TRUE : FALSE;
+    if (!session || !session->handlePostConnect()) {
+        return FALSE;
+    }
+    session->reportEvent(RdpServerLogLevel::Debug,
+                         QStringLiteral("Session state"),
+                         QStringLiteral("Post-connect negotiation completed."));
+    return TRUE;
 }
 
 BOOL RdpServerSession::peerActivate(freerdp_peer *peer)
@@ -234,7 +244,18 @@ BOOL RdpServerSession::peerActivate(freerdp_peer *peer)
 
     session->fullFrameRequested.store(true);
     session->activated.store(true);
+    session->reportEvent(RdpServerLogLevel::Info,
+                         QStringLiteral("Session state"),
+                         QStringLiteral("Session activated."));
     return TRUE;
+}
+
+BOOL RdpServerSession::peerLogon(freerdp_peer *peer,
+                                 const SEC_WINNT_AUTH_IDENTITY *identity,
+                                 BOOL automatic)
+{
+    RdpServerSession *session = sessionForPeer(peer);
+    return session && session->handleLogon(identity, automatic != FALSE) ? TRUE : FALSE;
 }
 
 BOOL RdpServerSession::inputKeyboardEvent(rdpInput *input, UINT16 flags, UINT8 code)
@@ -466,7 +487,8 @@ UINT RdpServerSession::clipboardClientFormatDataResponse(
 bool RdpServerSession::handlePostConnect()
 {
     if (!desktopCapture) {
-        reportError(QStringLiteral("Desktop capture is not initialized."));
+        reportError(QStringLiteral("Desktop capture is not initialized."),
+                    QStringLiteral("Desktop capture error"));
         return false;
     }
 
@@ -475,13 +497,34 @@ bool RdpServerSession::handlePostConnect()
     if (!size.isValid()) {
         reportError(errorMessage.isEmpty()
                         ? QStringLiteral("Failed to query the desktop resolution.")
-                        : errorMessage);
+                        : errorMessage,
+                    QStringLiteral("Desktop capture error"));
         return false;
     }
     if (!applyDesktopSize(size, true)) {
         return false;
     }
     return true;
+}
+
+bool RdpServerSession::handleLogon(const SEC_WINNT_AUTH_IDENTITY *identity, bool automatic)
+{
+    Q_UNUSED(identity);
+
+    const bool accepted = configuration.authentication == RdpServerAuthentication::Disabled
+                          || automatic;
+    if (accepted) {
+        reportEvent(RdpServerLogLevel::Info,
+                    QStringLiteral("Authentication result"),
+                    automatic ? QStringLiteral("Authentication succeeded using NLA.")
+                              : QStringLiteral("Anonymous TLS/RDP connection accepted because "
+                                               "authentication is disabled."));
+        return true;
+    }
+
+    reportError(QStringLiteral("Authentication rejected: NLA is required by server policy."),
+                QStringLiteral("Authentication result"));
+    return false;
 }
 
 bool RdpServerSession::initializePeer()
@@ -492,7 +535,8 @@ bool RdpServerSession::initializePeer()
 
     desktopCapture = captureFactory ? captureFactory() : nullptr;
     if (!desktopCapture) {
-        reportError(QStringLiteral("Desktop capture is not available on this platform."));
+        reportError(QStringLiteral("Desktop capture is not available on this platform."),
+                    QStringLiteral("Desktop capture error"));
         return false;
     }
 
@@ -524,7 +568,8 @@ bool RdpServerSession::initializePeer()
         || captureSize.height > (std::numeric_limits<UINT16>::max)()) {
         reportError(captureError.isEmpty()
                         ? QStringLiteral("The desktop resolution is invalid or exceeds the RDP limit.")
-                        : captureError);
+                        : captureError,
+                    QStringLiteral("Desktop capture error"));
         return false;
     }
 
@@ -538,20 +583,31 @@ bool RdpServerSession::initializePeer()
     }
 
     rdpSettings *settings = peer->context->settings;
-    const TestServerCredentials &credentials = testServerCredentials();
-    if (!credentials.isValid()) {
-        return false;
+    QByteArray privateKeyFile;
+    QByteArray certificateFile;
+    if (!configuration.certificateFile.isEmpty()) {
+        privateKeyFile = QFile::encodeName(configuration.privateKeyFile);
+        certificateFile = QFile::encodeName(configuration.certificateFile);
+    } else {
+        const TestServerCredentials &credentials = testServerCredentials();
+        if (!credentials.isValid()) {
+            reportError(QStringLiteral("Failed to generate the ephemeral TLS certificate."),
+                        QStringLiteral("RDP protocol error"));
+            return false;
+        }
+        privateKeyFile = credentials.encodedPrivateKeyFile();
+        certificateFile = credentials.encodedCertificateFile();
     }
 
-    const QByteArray privateKeyFile = credentials.encodedPrivateKeyFile();
     rdpPrivateKey *privateKey = freerdp_key_new_from_file_enc(privateKeyFile.constData(), nullptr);
     if (!privateKey
         || !freerdp_settings_set_pointer_len(settings, FreeRDP_RdpServerRsaKey, privateKey, 1)) {
         freerdp_key_free(privateKey);
+        reportError(QStringLiteral("Failed to load the configured TLS private key."),
+                    QStringLiteral("RDP protocol error"));
         return false;
     }
 
-    const QByteArray certificateFile = credentials.encodedCertificateFile();
     rdpCertificate *certificate = freerdp_certificate_new_from_file(certificateFile.constData());
     if (!certificate
         || !freerdp_settings_set_pointer_len(settings,
@@ -559,12 +615,22 @@ bool RdpServerSession::initializePeer()
                                              certificate,
                                              1)) {
         freerdp_certificate_free(certificate);
+        reportError(QStringLiteral("Failed to load the configured TLS certificate."),
+                    QStringLiteral("RDP protocol error"));
         return false;
     }
 
-    if (!freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, TRUE)
+    const bool requireNla = configuration.authentication == RdpServerAuthentication::Nla;
+    if (!configuration.ntlmSamFile.isEmpty()
+        && !freerdp_settings_set_string(settings,
+                                        FreeRDP_NtlmSamFile,
+                                        QFile::encodeName(configuration.ntlmSamFile).constData())) {
+        return false;
+    }
+
+    if (!freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, requireNla ? FALSE : TRUE)
         || !freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE)
-        || !freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, FALSE)
+        || !freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, requireNla ? TRUE : FALSE)
         || !freerdp_settings_set_bool(settings, FreeRDP_ExtSecurity, FALSE)
         || !freerdp_settings_set_uint32(settings,
                                         FreeRDP_EncryptionLevel,
@@ -597,6 +663,7 @@ bool RdpServerSession::initializePeer()
 
     peer->PostConnect = peerPostConnect;
     peer->Activate = peerActivate;
+    peer->Logon = peerLogon;
     rdpInput *input = peer->context->input;
     input->KeyboardEvent = inputKeyboardEvent;
     input->UnicodeKeyboardEvent = inputUnicodeKeyboardEvent;
@@ -812,7 +879,8 @@ bool RdpServerSession::applyDesktopSize(const DesktopSize &size, bool notifyClie
     if (!size.isValid() || size.width > (std::numeric_limits<UINT16>::max)()
         || size.height > (std::numeric_limits<UINT16>::max)() || !peer || !peer->context
         || !peer->context->settings) {
-        reportError(QStringLiteral("The captured desktop resolution cannot be used by RDP."));
+        reportError(QStringLiteral("The captured desktop resolution cannot be used by RDP."),
+                    QStringLiteral("Desktop capture error"));
         return false;
     }
 
@@ -864,7 +932,8 @@ bool RdpServerSession::sendDesktopFrame(bool forceFullFrame)
     if (captureResult.status == DesktopCaptureStatus::Error) {
         reportError(captureResult.errorMessage.isEmpty()
                         ? QStringLiteral("Desktop capture failed.")
-                        : captureResult.errorMessage);
+                        : captureResult.errorMessage,
+                    QStringLiteral("Desktop capture error"));
         return false;
     }
     if (captureResult.status == DesktopCaptureStatus::NoChanges) {
@@ -873,7 +942,8 @@ bool RdpServerSession::sendDesktopFrame(bool forceFullFrame)
 
     const DesktopFrame &frame = captureResult.frame;
     if (!frame.isValid()) {
-        reportError(QStringLiteral("Desktop capture returned an invalid frame."));
+        reportError(QStringLiteral("Desktop capture returned an invalid frame."),
+                    QStringLiteral("Desktop capture error"));
         return false;
     }
 
@@ -923,19 +993,34 @@ bool RdpServerSession::sendDesktopFrame(bool forceFullFrame)
     return true;
 }
 
-void RdpServerSession::reportError(const QString &message)
+void RdpServerSession::reportEvent(RdpServerLogLevel level,
+                                   const QString &category,
+                                   const QString &message)
+{
+    if (eventHandler) {
+        eventHandler(sessionId, level, category, message);
+    }
+}
+
+void RdpServerSession::reportError(const QString &message, const QString &category)
 {
     if (errorReported.exchange(true)) {
         return;
     }
     if (errorHandler) {
-        errorHandler(sessionId, message);
+        errorHandler(sessionId, category, message);
     }
 }
 
 void RdpServerSession::run()
 {
+    reportEvent(RdpServerLogLevel::Debug,
+                QStringLiteral("Session state"),
+                QStringLiteral("Session worker started."));
     if (initializePeer()) {
+        reportEvent(RdpServerLogLevel::Debug,
+                    QStringLiteral("Session state"),
+                    QStringLiteral("RDP peer initialized."));
         auto nextFrame = std::chrono::steady_clock::now();
 
         while (!stopRequested.load()) {
@@ -949,6 +1034,7 @@ void RdpServerSession::run()
                                                                   maximumPeerHandles)
                                           : 0;
             if (handleCount == 0) {
+                reportError(QStringLiteral("FreeRDP returned no session event handles."));
                 break;
             }
 
@@ -958,6 +1044,7 @@ void RdpServerSession::run()
                 const HANDLE channelEvent =
                     WTSVirtualChannelManagerGetEventHandle(virtualChannelManager);
                 if (!channelEvent) {
+                    reportError(QStringLiteral("Failed to obtain the virtual channel event handle."));
                     break;
                 }
                 virtualChannelHandleIndex = totalHandleCount;
@@ -969,10 +1056,14 @@ void RdpServerSession::run()
                                                              FALSE,
                                                              eventPollIntervalMs);
             if (waitResult == WAIT_FAILED) {
+                reportError(QStringLiteral("Waiting for an RDP session event failed (system error %1).")
+                                .arg(GetLastError()),
+                            QStringLiteral("Network error"));
                 break;
             }
             if (waitResult != WAIT_TIMEOUT) {
                 if (waitResult >= WAIT_OBJECT_0 + totalHandleCount) {
+                    reportError(QStringLiteral("FreeRDP returned an unexpected session event."));
                     break;
                 }
 
@@ -980,10 +1071,14 @@ void RdpServerSession::run()
                 if (signaledHandle == virtualChannelHandleIndex) {
                     if (!WTSVirtualChannelManagerCheckFileDescriptorEx(
                             virtualChannelManager, FALSE)) {
+                        reportError(QStringLiteral("FreeRDP virtual channel processing failed."));
                         break;
                     }
                 } else if (!peer->CheckFileDescriptor
                            || !peer->CheckFileDescriptor(peer)) {
+                    reportEvent(RdpServerLogLevel::Debug,
+                                QStringLiteral("Session state"),
+                                QStringLiteral("RDP transport closed."));
                     break;
                 }
             }
@@ -1005,12 +1100,15 @@ void RdpServerSession::run()
                 nextFrame = now + frameInterval;
             }
         }
-    } else {
+    } else if (!errorReported.load()) {
         reportError(QStringLiteral("Failed to initialize the RDP client session."));
     }
 
     cleanupPeer();
     running.store(false);
+    reportEvent(RdpServerLogLevel::Debug,
+                QStringLiteral("Session state"),
+                QStringLiteral("Session worker stopped."));
     if (closedHandler) {
         closedHandler(sessionId, address);
     }

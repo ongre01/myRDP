@@ -4,17 +4,12 @@
 #include "clipboardcontroller.h"
 #include "desktopcapture.h"
 #include "inputcontroller.h"
+#include "serverconfiguration.h"
 
 #include <QObject>
 #include <QString>
 
 #include <memory>
-
-struct RdpServerConfiguration
-{
-    QString bindAddress = QStringLiteral("0.0.0.0");
-    quint16 port = 3389;
-};
 
 struct RdpServerDependencies
 {
@@ -46,6 +41,9 @@ signals:
     void clientConnected(quint64 sessionId, const QString &peerAddress);
     void clientDisconnected(quint64 sessionId, const QString &peerAddress);
     void errorOccurred(const QString &message);
+    void logMessage(RdpServerLogLevel level,
+                    const QString &category,
+                    const QString &message);
 
 private:
     class Impl;

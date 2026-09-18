@@ -1,3 +1,4 @@
+#include "autostartmanager.h"
 #include "clipboardcontroller.h"
 #include "desktopcapture.h"
 #include "desktopframebuffer_p.h"
@@ -6,14 +7,19 @@
 #include "rdpclient.h"
 #include "rdpinputhandler_p.h"
 #include "rdpserver.h"
+#include "serverconfiguration.h"
+#include "serverlogger.h"
 
 #include <QCoreApplication>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QFile>
 #include <QSignalSpy>
 #include <QScopeGuard>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTemporaryDir>
 #include <QTest>
 
 #if defined(Q_OS_WIN)
@@ -675,8 +681,12 @@ class RdpServerTest : public QObject
     Q_OBJECT
 
 private slots:
+    void buildsAutomaticStartupCommand();
+    void loadsAndValidatesServerConfiguration();
+    void filtersAndWritesLogMessages();
     void rejectsInvalidPort();
     void acceptsAndClosesSession();
+    void enforcesMaximumClientCount();
     void tracksDesktopFrameChanges();
     void capturesWindowsDesktop();
     void routesRdpInputEvents();
@@ -686,6 +696,108 @@ private slots:
     void connectsWithTlsAndReconnects();
     void integratesOwnClientAndServer();
 };
+
+void RdpServerTest::buildsAutomaticStartupCommand()
+{
+    const QString applicationPath = QStringLiteral("C:/Program Files/QtRdp/RDPServer.exe");
+    QCOMPARE(AutoStartManager::startupCommand(applicationPath),
+             QStringLiteral("\"%1\" --background")
+                 .arg(QDir::toNativeSeparators(applicationPath)));
+    QVERIFY(AutoStartManager::startupCommand(QString()).isEmpty());
+
+    const AutoStartManager manager(applicationPath);
+#if defined(Q_OS_WIN)
+    QVERIFY(manager.isSupported());
+#else
+    QVERIFY(!manager.isSupported());
+#endif
+}
+
+void RdpServerTest::loadsAndValidatesServerConfiguration()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString configurationPath = directory.filePath(QStringLiteral("RDPServer.ini"));
+
+    QFile configurationFile(configurationPath);
+    QVERIFY(configurationFile.open(QIODevice::WriteOnly | QIODevice::Text));
+    QVERIFY(configurationFile.write(
+                "[Server]\n"
+                "ListenAddress=127.0.0.1\n"
+                "RdpPort=3391\n"
+                "Authentication=Disabled\n"
+                "Certificate=\n"
+                "PrivateKey=\n"
+                "Capture=Desktop\n"
+                "MaximumClientCount=3\n"
+                "LogLevel=Warning\n"
+                "LogFile=logs/server.log\n")
+            > 0);
+    configurationFile.close();
+
+    RdpServerConfiguration configuration;
+    QString errorMessage;
+    QVERIFY2(RdpServerSettings::load(configurationPath, &configuration, &errorMessage),
+             qPrintable(errorMessage));
+    QCOMPARE(configuration.bindAddress, QStringLiteral("127.0.0.1"));
+    QCOMPARE(configuration.port, quint32(3391));
+    QVERIFY(configuration.authentication == RdpServerAuthentication::Disabled);
+    QVERIFY(configuration.captureMode == RdpServerCaptureMode::Desktop);
+    QCOMPARE(configuration.maximumClientCount, quint32(3));
+    QVERIFY(configuration.logLevel == RdpServerLogLevel::Warning);
+    QCOMPARE(configuration.logFilePath,
+             directory.filePath(QStringLiteral("logs/server.log")));
+
+    QVERIFY(configurationFile.open(QIODevice::WriteOnly
+                                   | QIODevice::Truncate
+                                   | QIODevice::Text));
+    QVERIFY(configurationFile.write(
+                "[Server]\n"
+                "ListenAddress=not-an-address\n"
+                "RdpPort=70000\n"
+                "Authentication=maybe\n"
+                "Capture=Unknown\n"
+                "MaximumClientCount=0\n"
+                "LogLevel=Verbose\n")
+            > 0);
+    configurationFile.close();
+
+    QVERIFY(!RdpServerSettings::load(configurationPath, &configuration, &errorMessage));
+    QVERIFY(!errorMessage.isEmpty());
+}
+
+void RdpServerTest::filtersAndWritesLogMessages()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString logPath = directory.filePath(QStringLiteral("server.log"));
+
+    {
+        RdpServerLogger logger;
+        QString errorMessage;
+        QVERIFY2(logger.configure(RdpServerLogLevel::Warning, logPath, &errorMessage),
+                 qPrintable(errorMessage));
+        QVERIFY(logger.write(RdpServerLogLevel::Debug,
+                             QStringLiteral("Session state"),
+                             QStringLiteral("filtered debug event"),
+                             &errorMessage));
+        QVERIFY(logger.write(RdpServerLogLevel::Warning,
+                             QStringLiteral("Network error"),
+                             QStringLiteral("warning event"),
+                             &errorMessage));
+        QVERIFY(logger.write(RdpServerLogLevel::Error,
+                             QStringLiteral("RDP protocol error"),
+                             QStringLiteral("protocol event"),
+                             &errorMessage));
+    }
+
+    QFile logFile(logPath);
+    QVERIFY(logFile.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QString contents = QString::fromUtf8(logFile.readAll());
+    QVERIFY(!contents.contains(QStringLiteral("filtered debug event")));
+    QVERIFY(contents.contains(QStringLiteral("[WARNING] [Network error] warning event")));
+    QVERIFY(contents.contains(QStringLiteral("[ERROR] [RDP protocol error] protocol event")));
+}
 
 void RdpServerTest::rejectsInvalidPort()
 {
@@ -742,6 +854,54 @@ void RdpServerTest::acceptsAndClosesSession()
     QVERIFY(server.isListening());
     server.stop();
     QVERIFY(!server.isListening());
+}
+
+void RdpServerTest::enforcesMaximumClientCount()
+{
+    QTcpServer portProbe;
+    QVERIFY(portProbe.listen(QHostAddress::LocalHost, 0));
+    const quint16 port = portProbe.serverPort();
+    portProbe.close();
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+
+    RdpServer server;
+    QVERIFY2(server.isInitialized(), qPrintable(server.lastError()));
+    QSignalSpy connectedSpy(&server, &RdpServer::clientConnected);
+
+    RdpServerConfiguration configuration;
+    configuration.bindAddress = QStringLiteral("127.0.0.1");
+    configuration.port = port;
+    configuration.maximumClientCount = 1;
+    configuration.logLevel = RdpServerLogLevel::Debug;
+    configuration.logFilePath = directory.filePath(QStringLiteral("server.log"));
+    QVERIFY2(server.start(configuration), qPrintable(server.lastError()));
+
+    QTcpSocket firstClient;
+    firstClient.connectToHost(QHostAddress::LocalHost, port);
+    QVERIFY(firstClient.waitForConnected(2000));
+    QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2000);
+    QTRY_COMPARE_WITH_TIMEOUT(server.sessionCount(), qsizetype(1), 2000);
+
+    QTcpSocket secondClient;
+    secondClient.connectToHost(QHostAddress::LocalHost, port);
+    QVERIFY(secondClient.waitForConnected(2000));
+    QTRY_VERIFY_WITH_TIMEOUT(secondClient.state() == QAbstractSocket::UnconnectedState, 2000);
+    QCOMPARE(connectedSpy.count(), 1);
+    QCOMPARE(server.sessionCount(), qsizetype(1));
+
+    firstClient.disconnectFromHost();
+    if (firstClient.state() != QAbstractSocket::UnconnectedState) {
+        QVERIFY(firstClient.waitForDisconnected(2000));
+    }
+    QTRY_COMPARE_WITH_TIMEOUT(server.sessionCount(), qsizetype(0), 2000);
+    server.stop();
+
+    QFile logFile(configuration.logFilePath);
+    QVERIFY(logFile.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QString contents = QString::fromUtf8(logFile.readAll());
+    QVERIFY(contents.contains(QStringLiteral("maximum client count")));
 }
 
 void RdpServerTest::tracksDesktopFrameChanges()
