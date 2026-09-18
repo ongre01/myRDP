@@ -29,5 +29,7 @@ private:
 
     Ui::MainWindow *ui;
     RdpServer server;
+    RdpServerConfiguration configuration;
+    bool configurationLoaded = false;
 };
 #endif // MAINWINDOW_H

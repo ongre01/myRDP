@@ -36,7 +36,9 @@ SOURCES += \
     ../rdpclipboardhandler.cpp \
     ../rdpinputhandler.cpp \
     ../rdpserver.cpp \
-    ../rdpserversession.cpp
+    ../rdpserversession.cpp \
+    ../serverconfiguration.cpp \
+    ../serverlogger.cpp
 
 win32: SOURCES += \
     ../windowsclipboardcontroller.cpp \
@@ -54,7 +56,9 @@ HEADERS += \
     ../rdpclipboardhandler_p.h \
     ../rdpinputhandler_p.h \
     ../rdpserver.h \
-    ../rdpserversession_p.h
+    ../rdpserversession_p.h \
+    ../serverconfiguration.h \
+    ../serverlogger.h
 
 win32: HEADERS += \
     ../windowsclipboardcontroller_p.h \
