@@ -1,3 +1,4 @@
+#include "autostartmanager.h"
 #include "clipboardcontroller.h"
 #include "desktopcapture.h"
 #include "desktopframebuffer_p.h"
@@ -10,6 +11,7 @@
 #include "serverlogger.h"
 
 #include <QCoreApplication>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
@@ -679,6 +681,7 @@ class RdpServerTest : public QObject
     Q_OBJECT
 
 private slots:
+    void buildsAutomaticStartupCommand();
     void loadsAndValidatesServerConfiguration();
     void filtersAndWritesLogMessages();
     void rejectsInvalidPort();
@@ -693,6 +696,22 @@ private slots:
     void connectsWithTlsAndReconnects();
     void integratesOwnClientAndServer();
 };
+
+void RdpServerTest::buildsAutomaticStartupCommand()
+{
+    const QString applicationPath = QStringLiteral("C:/Program Files/QtRdp/RDPServer.exe");
+    QCOMPARE(AutoStartManager::startupCommand(applicationPath),
+             QStringLiteral("\"%1\" --background")
+                 .arg(QDir::toNativeSeparators(applicationPath)));
+    QVERIFY(AutoStartManager::startupCommand(QString()).isEmpty());
+
+    const AutoStartManager manager(applicationPath);
+#if defined(Q_OS_WIN)
+    QVERIFY(manager.isSupported());
+#else
+    QVERIFY(!manager.isSupported());
+#endif
+}
 
 void RdpServerTest::loadsAndValidatesServerConfiguration()
 {

@@ -29,6 +29,7 @@ SOURCES += \
     tst_rdpserver.cpp \
     ../../RDPClient/clipboardtextcodec.cpp \
     ../../RDPClient/rdpclient.cpp \
+    ../autostartmanager.cpp \
     ../clipboardcontroller.cpp \
     ../desktopcapture.cpp \
     ../desktopframebuffer.cpp \
@@ -49,6 +50,7 @@ HEADERS += \
     ../../RDPClient/clipboardtextcodec.h \
     ../../RDPClient/rdpclient.h \
     ../../RDPClient/rdpinput.h \
+    ../autostartmanager.h \
     ../clipboardcontroller.h \
     ../desktopcapture.h \
     ../desktopframebuffer_p.h \

@@ -17,6 +17,7 @@ include(../qmake/freerdp.pri)
 win32: LIBS += -lws2_32 -lgdi32 -luser32
 
 SOURCES += \
+    autostartmanager.cpp \
     clipboardcontroller.cpp \
     desktopcapture.cpp \
     desktopframebuffer.cpp \
@@ -36,6 +37,7 @@ win32: SOURCES += \
     windowsinputcontroller.cpp
 
 HEADERS += \
+    autostartmanager.h \
     clipboardcontroller.h \
     desktopcapture.h \
     desktopframebuffer_p.h \
